@@ -5,7 +5,7 @@ import pytest
 
 from resremd import testsystems
 from resremd.errors import ReservoirError
-from resremd.reservoir import Reservoir
+from resremd.reservoir import Reservoir, write_reservoir
 from resremd.system import create_context, make_integrator, topology_digest
 from resremd.thermo import Ensemble
 
@@ -90,3 +90,27 @@ def test_energies_are_those_of_the_injected_coordinates_and_cached(tmp_path):
     assert len(calls) == n, "a matching cache is read, not recomputed"
     res.energies(evaluate, key_fields={**key, "platform": "CPU"})
     assert len(calls) == 2 * n, "a different platform recomputes"
+
+
+def test_write_reservoir_from_arrays(tmp_path):
+    prepared = testsystems.double_well()
+    positions = np.zeros((3, 1, 3))
+    positions[:, 0, 0] = [-1.0, 0.0, 1.0]
+    meta = write_reservoir(tmp_path / "r", topology=prepared.topology,
+                           positions=positions, kind="weighted",
+                           temperature_K=500.0, weights=np.array([1, 1, 2]))
+    res = Reservoir.open(tmp_path / "r")
+    assert meta["n_frames"] == 3 and res.kind == "weighted"
+    assert np.allclose(res.weights, [0.25, 0.25, 0.5])
+
+
+def test_alanine_dipeptide_is_the_l_enantiomer():
+    md = pytest.importorskip("mdtraj")
+    top, pos = testsystems.alanine_dipeptide()
+    t = md.Trajectory(pos[None], md.Topology.from_openmm(top))
+    idx = {a.name: a.index for a in t.topology.atoms
+           if a.residue.name == "ALA"}
+    zeta = np.degrees(md.compute_dihedrals(
+        t, [[idx["CA"], idx["N"], idx["C"], idx["CB"]]]))[0, 0]
+    assert 25 < zeta < 45, "L-amino acids have zeta near +34 degrees"
+    assert top.getNumAtoms() == 22

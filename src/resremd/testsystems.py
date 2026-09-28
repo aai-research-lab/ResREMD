@@ -12,10 +12,9 @@ from pathlib import Path
 
 import numpy as np
 
-from .reservoir import (ReservoirWriter, base_metadata, write_json,
-                        write_topology)
-from .system import from_objects, topology_digest
-from .thermo import BOLTZ, Ensemble
+from .reservoir import write_reservoir
+from .system import from_objects
+from .thermo import BOLTZ
 
 #: An asymmetric double well along x, harmonic in y and z (kJ/mol, nm).
 BARRIER = 20.0
@@ -81,31 +80,110 @@ def write_double_well_reservoir(path: Path, *, kind: str, n_frames: int,
     rng = np.random.default_rng(seed)
     if kind == "boltzmann":
         x = exact_x_samples(temperature_K, n_frames, rng)
-        sigma = np.sqrt(BOLTZ * temperature_K / SPRING)
-        yz = rng.normal(0.0, sigma, size=(n_frames, 2))
     elif kind == "non_boltzmann":
         # Uniform over a region that holds all but a negligible part of the
         # density at the temperatures the tests use.
         x = rng.uniform(-2.0, 2.0, n_frames)
-        yz = rng.uniform(-0.35, 0.35, size=(n_frames, 2))
     else:
         raise ValueError(kind)
-    positions = np.column_stack([x, yz]).reshape(n_frames, 1, 3)
-    meta = base_metadata(kind=kind, temperature_K=temperature_K,
-                         ensemble=Ensemble(), n_frames=n_frames, n_atoms=1,
-                         periodic=False,
-                         topology_sha256=topology_digest(prepared.topology),
-                         source={"method": "exact draws for testing"})
-    writer = ReservoirWriter(path, n_frames=n_frames, n_atoms=1,
-                             periodic=False)
-    for k in range(n_frames):
-        writer.write(k, positions[k], None)
-    writer.flush()
-    write_topology(Path(path) / "topology.pdb", prepared.topology,
-                   positions[0].astype(float))
-    meta["complete"] = True
-    write_json(Path(path) / "reservoir.json", meta)
+    positions = double_well_frames(x, temperature_K, rng,
+                                   uniform_yz=kind == "non_boltzmann")
+    write_reservoir(path, topology=prepared.topology, positions=positions,
+                    kind=kind, temperature_K=temperature_K,
+                    source={"method": "exact draws for testing",
+                            "seed": seed})
     return prepared
+
+
+def double_well_frames(x, temperature_K: float | None, rng, *,
+                       uniform_yz: bool = False) -> np.ndarray:
+    """Frames (n, 1, 3) with the given x and y, z drawn to match.
+
+    y and z are harmonic, so at a temperature they are exactly Gaussian;
+    ``uniform_yz`` instead spreads them evenly, for a uniform reservoir.
+    """
+    x = np.asarray(x, dtype=float)
+    n = x.size
+    if uniform_yz:
+        yz = rng.uniform(-0.35, 0.35, size=(n, 2))
+    else:
+        sigma = np.sqrt(BOLTZ * temperature_K / SPRING)
+        yz = rng.normal(0.0, sigma, size=(n, 2))
+    return np.column_stack([x, yz]).reshape(n, 1, 3)
+
+
+def _place(a, b, c, bond, angle, dihedral):
+    """Position of d with |cd| = bond, angle bcd and dihedral abcd (deg)."""
+    angle, dihedral = np.radians(angle), np.radians(dihedral)
+    bc = (c - b) / np.linalg.norm(c - b)
+    n = np.cross(b - a, bc)
+    n /= np.linalg.norm(n)
+    m = np.cross(n, bc)
+    d = np.array([-bond * np.cos(angle),
+                  bond * np.sin(angle) * np.cos(dihedral),
+                  bond * np.sin(angle) * np.sin(dihedral)])
+    return c + d[0] * bc + d[1] * m + d[2] * n
+
+
+def alanine_dipeptide(phi: float = -80.0, psi: float = 150.0):
+    """Alanine dipeptide (ACE-ALA-NME) from ideal geometry.
+
+    Heavy atoms are placed from standard bond lengths and angles at the
+    given backbone dihedrals (degrees), hydrogens are added by OpenMM with
+    the Amber14 templates, and the structure is energy-minimised in vacuum.
+    Returns the topology and positions in nm.
+    """
+    import openmm
+    from openmm import app, unit
+
+    x: dict[str, np.ndarray] = {}
+    x["ACE:CH3"] = np.zeros(3)
+    x["ACE:C"] = np.array([0.152, 0.0, 0.0])
+    x["ALA:N"] = _place(np.array([0.0, 0.1, 0.0]), x["ACE:CH3"], x["ACE:C"],
+                        0.133, 116.0, 180.0)
+    x["ALA:CA"] = _place(x["ACE:CH3"], x["ACE:C"], x["ALA:N"],
+                         0.146, 122.0, 180.0)
+    x["ALA:C"] = _place(x["ACE:C"], x["ALA:N"], x["ALA:CA"],
+                        0.152, 111.0, phi)
+    x["NME:N"] = _place(x["ALA:N"], x["ALA:CA"], x["ALA:C"],
+                        0.133, 116.0, psi)
+    x["NME:C"] = _place(x["ALA:CA"], x["ALA:C"], x["NME:N"],
+                        0.146, 122.0, 180.0)
+    x["ACE:O"] = _place(x["ALA:CA"], x["ALA:N"], x["ACE:C"], 0.123, 123.0, 0.0)
+    x["ALA:O"] = _place(x["NME:C"], x["NME:N"], x["ALA:C"], 0.123, 123.0, 0.0)
+    # The CB position that makes CA an L centre: seen with the hydrogen
+    # towards the viewer, CO -> R -> N runs clockwise.
+    ca = x["ALA:CA"]
+    for sign in (1.0, -1.0):
+        cb = _place(x["ALA:C"], x["ALA:N"], ca, 0.153, 110.0, sign * 122.0)
+        units = [(p - ca) / np.linalg.norm(p - ca)
+                 for p in (x["ALA:N"], x["ALA:C"], cb)]
+        if np.dot(np.cross(x["ALA:C"] - ca, cb - ca), -sum(units)) < 0:
+            x["ALA:CB"] = cb
+            break
+    top = app.Topology()
+    chain = top.addChain()
+    positions = []
+    for resname, names in (("ACE", ("CH3", "C", "O")),
+                           ("ALA", ("N", "CA", "C", "O", "CB")),
+                           ("NME", ("N", "C"))):
+        residue = top.addResidue(resname, chain)
+        for name in names:
+            top.addAtom(name, app.element.Element.getBySymbol(name[0]),
+                        residue)
+            positions.append(x[f"{resname}:{name}"])
+    top.createStandardBonds()
+    forcefield = app.ForceField("amber14-all.xml")
+    modeller = app.Modeller(top, np.array(positions) * unit.nanometer)
+    modeller.addHydrogens(forcefield)
+    system = forcefield.createSystem(modeller.topology,
+                                     nonbondedMethod=app.NoCutoff)
+    context = openmm.Context(system, openmm.VerletIntegrator(0.001),
+                             openmm.Platform.getPlatformByName("Reference"))
+    context.setPositions(modeller.positions)
+    openmm.LocalEnergyMinimizer.minimize(context)
+    pos = context.getState(getPositions=True).getPositions(asNumpy=True)
+    return modeller.topology, np.asarray(pos.value_in_unit(unit.nanometer))
 
 
 def lj_box(n_side: int = 5, spacing: float = 0.5, pressure: bool = False):

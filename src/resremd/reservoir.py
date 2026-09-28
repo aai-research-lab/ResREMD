@@ -424,3 +424,45 @@ def base_metadata(*, kind: str, temperature_K: float | None,
         "resremd_version": __version__,
         "complete": False,
     }
+
+
+def write_reservoir(path: str | Path, *, topology: Any, positions: np.ndarray,
+                    kind: str, temperature_K: float | None,
+                    ensemble: Ensemble | None = None,
+                    box: np.ndarray | None = None,
+                    weights: np.ndarray | None = None,
+                    source: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Write a reservoir from frames already in memory.
+
+    ``positions`` is (frames, atoms, 3) in nm and ``box`` (frames, 3, 3) for
+    a periodic system. For frames drawn some other way than by this
+    package's own generate and import: exact draws for a model system, or a
+    set with known weights.
+    """
+    from .system import topology_digest
+
+    path = Path(path)
+    positions = np.asarray(positions, dtype=float)
+    n_frames, n_atoms = positions.shape[:2]
+    if kind not in KINDS:
+        raise ReservoirError(f"Unknown reservoir kind {kind!r}.",
+                             code="resremd.reservoir.kind")
+    meta = base_metadata(kind=kind, temperature_K=temperature_K,
+                         ensemble=ensemble or Ensemble(), n_frames=n_frames,
+                         n_atoms=n_atoms, periodic=box is not None,
+                         topology_sha256=topology_digest(topology),
+                         source=source or {"method": "written from arrays"})
+    writer = ReservoirWriter(path, n_frames=n_frames, n_atoms=n_atoms,
+                             periodic=box is not None)
+    for k in range(n_frames):
+        writer.write(k, positions[k], None if box is None else box[k])
+    writer.flush()
+    if weights is not None:
+        w = np.asarray(weights, dtype=float)
+        np.save(path / "weights.npy", w / w.sum())
+    write_topology(path / "topology.pdb", topology, positions[0],
+                   None if box is None else np.asarray(box[0]))
+    meta["complete"] = True
+    write_json(path / "reservoir.json", meta)
+    Reservoir.open(path)  # everything written is checked on the way out
+    return meta
