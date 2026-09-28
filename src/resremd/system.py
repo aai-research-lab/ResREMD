@@ -75,6 +75,36 @@ def load_prepared(directory: str | Path) -> Prepared:
                             source=str(directory.resolve())))
 
 
+def write_prepared(directory: str | Path, system: Any, topology: Any,
+                   positions: np.ndarray, box: np.ndarray | None = None,
+                   velocities: np.ndarray | None = None) -> Path:
+    """Write system.xml, state.xml and topology.pdb: the inverse of
+    :func:`load_prepared`, in the layout FastMDXplora uses."""
+    import openmm
+    from openmm import Vec3, app
+
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    integrator = openmm.VerletIntegrator(0.001)
+    context = openmm.Context(system, integrator,
+                             openmm.Platform.getPlatformByName("Reference"))
+    if box is not None:
+        context.setPeriodicBoxVectors(*(Vec3(*map(float, r)) for r in box))
+    context.setPositions(np.asarray(positions, dtype=float))
+    if velocities is not None:
+        context.setVelocities(np.asarray(velocities, dtype=float))
+    state = context.getState(getPositions=True, getVelocities=True)
+    (directory / "system.xml").write_text(
+        openmm.XmlSerializer.serialize(system))
+    (directory / "state.xml").write_text(openmm.XmlSerializer.serialize(state))
+    top = subset_topology(topology, np.arange(topology.getNumAtoms()), box)
+    with open(directory / "topology.pdb", "w") as fh:
+        # PDBFile takes plain numbers as angstroms.
+        app.PDBFile.writeFile(top, np.asarray(positions) * 10.0, fh,
+                              keepIds=True)
+    return directory
+
+
 def from_objects(system: Any, topology: Any, positions: Any,
                  box: Any = None) -> Prepared:
     """Wrap objects already in memory. Positions and box in nm or Quantity."""

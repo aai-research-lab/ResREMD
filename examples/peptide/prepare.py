@@ -7,18 +7,18 @@ there can be used instead.
     python prepare.py alanine-dipeptide.pdb --solvent implicit --output setup
 
 Implicit solvent (GBn2) is the fast choice for a demonstration and for small
-peptides. Explicit solvent (TIP3P-FB, PME) is what the JPCB 2022 benchmarks
-used. With it, the box is first equilibrated at constant pressure at the
-lowest replica temperature, so that the constant-volume replica exchange
-and the reservoir both run at the right density; the System written has no
-barostat.
+peptides. With explicit solvent (TIP3P-FB, PME) the box is first
+equilibrated at constant pressure at the lowest replica temperature, so that
+constant-volume replica exchange and the reservoir both run at the right
+density; the System written has no barostat.
 """
 
 import argparse
-from pathlib import Path
 
-import openmm
 from openmm import app, unit
+
+from resremd.system import write_prepared
+from resremd.testsystems import prepare_peptide
 
 
 def main() -> None:
@@ -38,58 +38,14 @@ def main() -> None:
     args = parser.parse_args()
 
     pdb = app.PDBFile(args.pdb)
-    if args.solvent == "implicit":
-        forcefield = app.ForceField("amber14-all.xml", "implicit/gbn2.xml")
-        modeller = app.Modeller(pdb.topology, pdb.positions)
-        modeller.addHydrogens(forcefield)
-        system = forcefield.createSystem(modeller.topology,
-                                         nonbondedMethod=app.NoCutoff,
-                                         constraints=app.HBonds)
-    else:
-        forcefield = app.ForceField("amber14-all.xml", "amber14/tip3pfb.xml")
-        modeller = app.Modeller(pdb.topology, pdb.positions)
-        modeller.addHydrogens(forcefield)
-        modeller.addSolvent(forcefield, padding=args.padding_nm * unit.nanometer,
-                            neutralize=True)
-        system = forcefield.createSystem(modeller.topology,
-                                         nonbondedMethod=app.PME,
-                                         nonbondedCutoff=0.9 * unit.nanometer,
-                                         constraints=app.HBonds,
-                                         rigidWater=True)
-
-    integrator = openmm.VerletIntegrator(0.001)
-    context = openmm.Context(system, integrator)
-    context.setPositions(modeller.positions)
-    openmm.LocalEnergyMinimizer.minimize(context)
-    state = context.getState(getPositions=True, enforcePeriodicBox=False)
-
-    if args.solvent == "explicit" and args.npt_ns > 0:
-        npt = openmm.XmlSerializer.deserialize(
-            openmm.XmlSerializer.serialize(system))
-        npt.addForce(openmm.MonteCarloBarostat(
-            1.0 * unit.bar, args.temperature_K * unit.kelvin))
-        dynamics = openmm.LangevinMiddleIntegrator(
-            args.temperature_K * unit.kelvin, 1.0 / unit.picosecond,
-            2.0 * unit.femtosecond)
-        equilibrate = openmm.Context(npt, dynamics)
-        equilibrate.setState(state)
-        equilibrate.setVelocitiesToTemperature(args.temperature_K * unit.kelvin)
-        steps = int(round(args.npt_ns * 1e6 / 2.0))
-        print(f"Equilibrating the density: {args.npt_ns:g} ns at "
-              f"{args.temperature_K:g} K and 1 bar")
-        dynamics.step(steps)
-        state = equilibrate.getState(getPositions=True,
-                                     enforcePeriodicBox=False)
-        modeller.topology.setPeriodicBoxVectors(state.getPeriodicBoxVectors())
-
-    out = Path(args.output)
-    out.mkdir(parents=True, exist_ok=True)
-    (out / "system.xml").write_text(openmm.XmlSerializer.serialize(system))
-    (out / "state.xml").write_text(openmm.XmlSerializer.serialize(state))
-    with open(out / "topology.pdb", "w") as fh:
-        app.PDBFile.writeFile(modeller.topology, state.getPositions(), fh)
-    print(f"Prepared {modeller.topology.getNumAtoms()} atoms "
-          f"({args.solvent} solvent) in {out}/")
+    positions = pdb.getPositions(asNumpy=True).value_in_unit(unit.nanometer)
+    system, topology, positions, box = prepare_peptide(
+        pdb.topology, positions, solvent=args.solvent,
+        padding_nm=args.padding_nm, npt_ns=args.npt_ns,
+        temperature_K=args.temperature_K)
+    write_prepared(args.output, system, topology, positions, box)
+    print(f"Prepared {topology.getNumAtoms()} atoms ({args.solvent} solvent) "
+          f"in {args.output}/")
 
 
 if __name__ == "__main__":

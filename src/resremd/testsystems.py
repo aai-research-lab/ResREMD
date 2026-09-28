@@ -186,6 +186,77 @@ def alanine_dipeptide(phi: float = -80.0, psi: float = 150.0):
     return modeller.topology, np.asarray(pos.value_in_unit(unit.nanometer))
 
 
+def prepare_peptide(topology, positions, *, solvent: str = "implicit",
+                    padding_nm: float = 1.2, npt_ns: float = 0.5,
+                    temperature_K: float = 300.0, platform: str = "auto",
+                    seed: int | None = None):
+    """Amber14 parameters and solvent for a peptide, ready to simulate.
+
+    ``implicit`` is GBn2 with no cutoff. ``explicit`` is TIP3P-FB with PME
+    (0.9 nm cutoff), neutralised, and the box then equilibrated for
+    ``npt_ns`` at ``temperature_K`` and 1 bar so that constant-volume runs
+    start at the right density. Bonds to hydrogen are constrained. Returns
+    (system, topology, positions, box) with no barostat in the System, and
+    box None for implicit solvent.
+    """
+    import openmm
+    from openmm import app, unit
+
+    from .system import create_context
+
+    if solvent == "implicit":
+        forcefield = app.ForceField("amber14-all.xml", "implicit/gbn2.xml")
+    elif solvent == "explicit":
+        forcefield = app.ForceField("amber14-all.xml", "amber14/tip3pfb.xml")
+    else:
+        raise ValueError(f"solvent is implicit or explicit, not {solvent!r}")
+    modeller = app.Modeller(topology, np.asarray(positions) * unit.nanometer)
+    modeller.addHydrogens(forcefield)
+    if solvent == "implicit":
+        system = forcefield.createSystem(modeller.topology,
+                                         nonbondedMethod=app.NoCutoff,
+                                         constraints=app.HBonds)
+    else:
+        modeller.addSolvent(forcefield, padding=padding_nm * unit.nanometer,
+                            neutralize=True)
+        system = forcefield.createSystem(modeller.topology,
+                                         nonbondedMethod=app.PME,
+                                         nonbondedCutoff=0.9 * unit.nanometer,
+                                         constraints=app.HBonds,
+                                         rigidWater=True)
+    context, _ = create_context(system, openmm.VerletIntegrator(0.001),
+                                platform=platform, precision="mixed",
+                                device=None, cpu_threads=None)
+    context.setPositions(modeller.positions)
+    openmm.LocalEnergyMinimizer.minimize(context)
+    state = context.getState(getPositions=True)
+    box = None
+    if solvent == "explicit" and npt_ns > 0:
+        npt = openmm.XmlSerializer.deserialize(
+            openmm.XmlSerializer.serialize(system))
+        npt.addForce(openmm.MonteCarloBarostat(1.0 * unit.bar,
+                                               temperature_K * unit.kelvin))
+        dynamics = openmm.LangevinMiddleIntegrator(
+            temperature_K * unit.kelvin, 1.0 / unit.picosecond,
+            2.0 * unit.femtosecond)
+        if seed is not None:
+            dynamics.setRandomNumberSeed(int(seed))
+        ctx, _ = create_context(npt, dynamics, platform=platform,
+                                precision="mixed", device=None,
+                                cpu_threads=None)
+        ctx.setState(state)
+        ctx.setVelocitiesToTemperature(temperature_K * unit.kelvin,
+                                       int(seed or 1))
+        dynamics.step(int(round(npt_ns * 1e6 / 2.0)))
+        state = ctx.getState(getPositions=True)
+    if solvent == "explicit":
+        box = np.asarray(state.getPeriodicBoxVectors(asNumpy=True)
+                         .value_in_unit(unit.nanometer))
+    positions = np.asarray(state.getPositions(asNumpy=True)
+                           .value_in_unit(unit.nanometer))
+    return system, modeller.topology, positions, box
+
+
 def lj_box(n_side: int = 5, spacing: float = 0.5, pressure: bool = False):
     """A small periodic Lennard-Jones fluid, for constant-pressure checks."""
     import openmm
