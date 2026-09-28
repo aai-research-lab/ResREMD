@@ -1,3 +1,223 @@
 # Reservoir-REMD
 
-Reservoir replica exchange molecular dynamics (Res-REMD) for OpenMM.
+Reservoir replica exchange molecular dynamics (Res-REMD) for OpenMM, on CPUs
+and GPUs.
+
+Temperature replica exchange (REMD) cannot converge at the temperature you
+care about until its hottest replica has found every relevant state, and
+that search is repeated by every replica for the length of the run.
+Res-REMD separates the two: the search is done once, by a simulation at a
+single high temperature, and its structures are stored in a reservoir. The
+replica exchange then only has to anneal those structures down the
+temperature ladder, which converges much faster. The hottest replica
+periodically attempts to exchange with a structure drawn at random from the
+reservoir, with a Metropolis criterion that keeps every temperature's
+ensemble exact.
+
+This package implements the method for OpenMM. Its GROMACS 4.6.7
+counterpart is
+[PlotkinLab/Reservoir-REMD](https://github.com/PlotkinLab/Reservoir-REMD)
+(Hsueh, Aina and Plotkin, *J. Phys. Chem. B* 2022).
+
+## Install
+
+Python 3.10 or later. The only dependencies are OpenMM and NumPy.
+
+```
+conda create -n resremd -c conda-forge python=3.12 openmm numpy mdtraj
+conda activate resremd
+pip install git+https://github.com/aai-research-lab/Reservoir-REMD
+```
+
+MDTraj is only needed to import existing trajectories into a reservoir, and
+PyYAML only to read YAML settings files.
+
+## Quick start
+
+The input is a prepared system: a directory holding `system.xml`,
+`state.xml` and `topology.pdb`, as
+[FastMDXplora](https://github.com/aai-research-lab/FastMDXplora)'s setup
+phase writes them. `examples/peptide/prepare.py` makes one from a PDB file.
+
+```
+# 1. The reservoir: 200 ns at 450 K, a frame every 10 ps
+resremd reservoir generate --prepared setup --temperature-K 450 \
+    --duration-ns 200 --output reservoir
+
+# 2. Replica exchange from 300 K, with the reservoir as the rung above the
+#    hottest of 8 replicas
+resremd run --prepared setup --reservoir reservoir \
+    --temperature-min-K 300 --n-replicas 8 --duration-ns 50 --output remd
+
+# 3. How the exchanges went
+resremd summary remd
+```
+
+The trajectory at 300 K is `remd/trajectories/state_000_300.00K.dcd`, with
+`remd/topology.pdb`.
+
+From Python:
+
+```python
+import resremd
+
+resremd.generate_reservoir("setup", output="reservoir", temperature_K=450,
+                           duration_ns=200)
+resremd.run("setup", output="remd", reservoir="reservoir",
+            temperature_min_K=300, n_replicas=8, duration_ns=50)
+print(resremd.format_summary(resremd.summarize("remd")))
+```
+
+`resremd options run` prints a settings file listing every option with its
+default and meaning. Settings can be given as flags, in a `--config` file,
+or as keyword arguments, and are the same in all three.
+
+## The method
+
+Each exchange cycle:
+
+1. Every replica runs `exchange_interval_steps` of Langevin dynamics at its
+   temperature.
+2. Neighbouring temperatures attempt to swap, on the even or the odd pairs
+   at random, with log α = (β_a − β_b)(h_i − h_j). A replica that changes
+   temperature has its velocities scaled by √(T_new / T_old).
+3. Every `reservoir_interval` cycles, the replica at the top temperature
+   attempts to exchange with a reservoir frame drawn at random, with
+   log α = (β_top − β_R)(h_replica − h_frame). On acceptance it continues from
+   that frame with velocities drawn at the top temperature. The reservoir
+   itself never changes: each draw is an independent sample of its
+   distribution.
+
+h is the potential energy at constant volume, and U + PV (minus γA for a
+membrane under surface tension) at constant pressure.
+
+### Reservoir kinds
+
+| kind | frames are | β_R | notes |
+|---|---|---|---|
+| `boltzmann` | an equilibrium sample at `temperature_K` | 1/kT_R | the usual choice |
+| `weighted` | any sampling, with weights making it Boltzmann at `temperature_K` | 1/kT_R | e.g. umbrella sampling reweighted with MBAR |
+| `non_boltzmann` | structures of equal weight covering configuration space | 0 | Roitberg et al. 2007; constant volume only |
+
+A replica exchange run coupled to a reservoir is exactly as correct as the
+reservoir. The build reports how many effectively independent frames the
+reservoir holds, judged from the potential energy. Slow conformational
+change decorrelates more slowly than the energy, so treat that number as an
+upper bound, and not as proof that the reservoir is converged.
+
+### What is checked before a run starts
+
+- The reservoir holds the system's atoms in the same order (by a digest of
+  the topology), and was sampled in the same pressure ensemble, with the
+  same kind of barostat.
+- For a reservoir generated here, its frames' energies are recomputed under
+  the run's System and compared with those recorded when it was built. A
+  spread of more than 0.5 kT means another Hamiltonian (force field, cutoff,
+  solvent model) and the run is refused; above 0.05 kT it is warned about.
+- At constant volume every reservoir frame has the run's box.
+- Reservoir energies are computed with the run's own System, platform and
+  precision, from exactly the coordinates that will be injected: constraints
+  applied and virtual sites placed by OpenMM, the same steps a replica takes
+  when it continues from the frame. They are cached, and a cache that does not
+  match all of these is recomputed, never reused.
+- The barostat, if any, is found by type, and each replica's copy is set to
+  that replica's temperature through the parameter its class defines
+  (`MonteCarloTemperature`, `MembraneMonteCarloTemperature`, ...).
+- Forces that cannot be run at several temperatures (an Andersen thermostat,
+  Drude polarisation) are refused.
+
+## Choosing settings
+
+- **Ladder.** Geometric spacing is the default. Aim for 20 to 40 percent
+  acceptance between neighbours; `resremd summary` reports it per pair. Give
+  `temperatures_K` to set the ladder by hand.
+- **Reservoir temperature.** Hot enough that barriers are crossed readily in
+  the reservoir simulation, and close enough to the top replica that frames
+  are accepted. Leaving `temperature_max_K` out places the reservoir one
+  geometric rung above the hottest replica, as in the GROMACS
+  implementation.
+- **Exchange interval.** 500 steps (1 ps at 2 fs) by default, as
+  `-replex 500` in GROMACS.
+- **Ensemble.** Constant volume is usual for explicit-solvent temperature
+  REMD: at 1 bar, water at the top of a ladder expands and can boil. Start
+  from a box equilibrated at constant pressure at the lowest temperature, and
+  generate the reservoir from the same prepared system so it has the same
+  box. `ensemble: nvt` removes a barostat the System carries; `ensemble: npt`
+  or `pressure_bar` runs at constant pressure.
+- **Imported frames.** XTC, GRO and PDB files round coordinates to 0.001 nm,
+  which stretches bonds enough to take frames out of the Boltzmann
+  distribution. Import from DCD, TRR or NetCDF.
+
+## Output
+
+| file | contents |
+|---|---|
+| `trajectories/state_NNN_TTT.TTK.dcd` | frames at each temperature |
+| `topology.pdb` | topology of the saved atoms |
+| `states.csv` | the temperature index each replica held, every cycle |
+| `energies.csv` | each replica's potential energy (kJ/mol), every cycle |
+| `volumes.csv` | each replica's volume (nm³), at constant pressure |
+| `areas.csv` | each replica's xy area (nm²), with a surface tension |
+| `reservoir_exchanges.csv` | every reservoir attempt: frame, enthalpies, log α, outcome |
+| `origins.csv` | the reservoir frame each replica's coordinates descend from (−1: the start) |
+| `manifest.json` | settings, system digests, acceptance, reservoir provenance, citations |
+| `run.log` | the log |
+| `checkpoint.npz` | the last checkpoint |
+
+The energies, states, and at constant pressure the volumes (and areas), are
+what MBAR needs to combine all temperatures.
+
+## Stopping and resuming
+
+`SIGINT` or `SIGTERM` (what a batch scheduler sends before its time limit)
+stops the run at the end of the current cycle, with a checkpoint.
+`--resume` continues it. A longer duration extends a finished run.
+Everything that decides what is sampled must match, and anything written
+after the last checkpoint is cut away before the run continues, so nothing
+is counted twice. Reservoir builds stop and resume the same way.
+
+## Hardware
+
+- `platform`: `auto` tries CUDA, HIP, OpenCL and then CPU, and warns, with
+  OpenMM's plugin load failures, if it ends up on a CPU.
+- `devices`: GPU indices, for example `--devices 0 1`. Replicas are spread
+  over them, one thread per device. No MPI is needed.
+- `contexts_per_device`: simulations kept on each device at once. With as
+  many contexts as replicas, replicas never leave the GPU and an exchange
+  changes only their temperature. With fewer, replicas share contexts and
+  are swapped in and out. The default is up to 4 on a GPU and 1 on the CPU.
+
+## Validation
+
+The test suite compares runs against distributions known exactly: a
+particle in an asymmetric double well, with a reservoir drawn exactly from
+the Boltzmann distribution or uniformly. Well populations and the
+temperature of every state must match the exact values within statistical
+error, for both reservoir kinds and for both ways of assigning replicas to
+contexts. `examples/double_well/compare.py` shows the same system converging
+with a reservoir while plain REMD of the same length does not.
+
+```
+pip install -e ".[test]"
+pytest                 # about a minute
+pytest -m slow         # longer statistical runs
+```
+
+## Use from FastMDXplora
+
+Settings are declared once, in `resremd.options`, in the shape of
+FastMDXplora's `Field` (name, type, default, help, choices, bounds) and with
+its unit-suffixed names (`temperature_K`, `timestep_fs`, `friction_per_ps`).
+A prepared FastMDXplora `setup/` directory is a valid `--prepared` input,
+the per-temperature trajectories are ordinary DCD files with a
+`topology.pdb`, and errors carry stable codes (`resremd.reservoir.mismatch`,
+...) for a caller to map onto its own.
+
+## Citing
+
+Please cite the method papers listed in `CITATION.cff`, which every run also
+records in its `manifest.json`.
+
+## License
+
+MIT. See `LICENSE`.

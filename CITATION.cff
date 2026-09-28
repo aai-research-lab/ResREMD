@@ -1,0 +1,67 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the method papers below."
+title: "Reservoir-REMD: reservoir replica exchange molecular dynamics for OpenMM"
+authors:
+  - family-names: Aina
+    given-names: Adekunle
+license: MIT
+repository-code: "https://github.com/aai-research-lab/Reservoir-REMD"
+keywords:
+  - molecular dynamics
+  - replica exchange
+  - enhanced sampling
+  - OpenMM
+preferred-citation:
+  type: article
+  title: "Ensemble Generation for Linear and Cyclic Peptides Using a Reservoir Replica Exchange Molecular Dynamics Implementation in GROMACS"
+  authors:
+    - family-names: Hsueh
+      given-names: Shawn C. C.
+    - family-names: Aina
+      given-names: Adekunle
+    - family-names: Plotkin
+      given-names: Steven S.
+  journal: "The Journal of Physical Chemistry B"
+  volume: 126
+  issue: 49
+  start: 10384
+  end: 10399
+  year: 2022
+  doi: "10.1021/acs.jpcb.2c05470"
+references:
+  - type: article
+    title: "Improving Convergence of Replica-Exchange Simulations through Coupling to a High-Temperature Structure Reservoir"
+    authors:
+      - family-names: Okur
+        given-names: Asim
+      - family-names: Roe
+        given-names: Daniel R.
+      - family-names: Cui
+        given-names: Guanglei
+      - family-names: Hornak
+        given-names: Viktor
+      - family-names: Simmerling
+        given-names: Carlos
+    journal: "Journal of Chemical Theory and Computation"
+    volume: 3
+    issue: 2
+    start: 557
+    end: 568
+    year: 2007
+    doi: "10.1021/ct600263e"
+  - type: article
+    title: "Coupling of Replica Exchange Simulations to a Non-Boltzmann Structure Reservoir"
+    authors:
+      - family-names: Roitberg
+        given-names: Adrian E.
+      - family-names: Okur
+        given-names: Asim
+      - family-names: Simmerling
+        given-names: Carlos
+    journal: "The Journal of Physical Chemistry B"
+    volume: 111
+    issue: 10
+    start: 2415
+    end: 2418
+    year: 2007
+    doi: "10.1021/jp068335b"
