@@ -1,0 +1,69 @@
+[build-system]
+requires = ["setuptools>=64", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reservoir-remd"
+dynamic = ["version"]
+description = "Reservoir replica exchange molecular dynamics (Res-REMD) for OpenMM"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "Adekunle Aina" },
+]
+maintainers = [
+    { name = "Adekunle Aina" },
+]
+keywords = [
+    "molecular-dynamics",
+    "replica-exchange",
+    "enhanced-sampling",
+    "openmm",
+    "reservoir",
+    "peptides",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Chemistry",
+    "Topic :: Scientific/Engineering :: Physics",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+# OpenMM and NumPy are the whole runtime. Everything else is optional and
+# asked for at the point of use with the command that installs it.
+dependencies = [
+    "numpy>=1.24",
+    "openmm>=8.2",
+]
+
+[project.optional-dependencies]
+# Reading existing trajectories (DCD, XTC, ...) into a reservoir.
+import = ["mdtraj>=1.9.7"]
+# YAML run files. JSON works without it.
+yaml = ["pyyaml>=6.0"]
+test = ["pytest>=7", "mdtraj>=1.9.7", "pyyaml>=6.0"]
+
+[project.scripts]
+resremd = "resremd.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/aai-research-lab/Reservoir-REMD"
+Issues = "https://github.com/aai-research-lab/Reservoir-REMD/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools_scm]
+version_file = "src/resremd/_version.py"
+fallback_version = "0.0.0"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: long statistical validation, deselected in CI with -m 'not slow'",
+]
