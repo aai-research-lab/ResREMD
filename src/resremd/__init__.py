@@ -10,10 +10,12 @@ try:
 except ImportError:  # an uninstalled checkout
     __version__ = "0.0.0"
 
+from .build import generate as generate_reservoir
+from .build import import_trajectories as import_reservoir
 from .errors import ResRemdError
 from .options import GENERATE, IMPORT, RUN
 from .reservoir import Reservoir
 from .sampler import run
 
-__all__ = ["__version__", "run", "Reservoir", "ResRemdError",
-           "RUN", "GENERATE", "IMPORT"]
+__all__ = ["__version__", "run", "generate_reservoir", "import_reservoir",
+           "Reservoir", "ResRemdError", "RUN", "GENERATE", "IMPORT"]
