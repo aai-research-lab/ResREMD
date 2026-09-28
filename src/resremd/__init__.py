@@ -12,5 +12,8 @@ except ImportError:  # an uninstalled checkout
 
 from .errors import ResRemdError
 from .options import GENERATE, IMPORT, RUN
+from .reservoir import Reservoir
+from .sampler import run
 
-__all__ = ["__version__", "ResRemdError", "RUN", "GENERATE", "IMPORT"]
+__all__ = ["__version__", "run", "Reservoir", "ResRemdError",
+           "RUN", "GENERATE", "IMPORT"]
