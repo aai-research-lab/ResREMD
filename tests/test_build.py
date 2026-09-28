@@ -96,3 +96,13 @@ def test_import_refuses_what_it_cannot_know(tmp_path):
     meta = resremd.import_reservoir(output=str(tmp_path / "r3"),
                                     pressure_bar=200.0, **common)
     assert meta["ensemble"]["pressure_bar"] == 200.0
+
+
+def test_generate_records_its_cost(tmp_path):
+    meta = resremd.generate_reservoir(
+        testsystems.double_well(), output=str(tmp_path / "r"),
+        temperature_K=520.0, duration_ns=0.02, frame_interval_steps=100,
+        equilibration_ns=0.002, platform="Reference", random_seed=2)
+    assert meta["cost"]["md_steps"] == {"equilibration": 1000,
+                                        "production": 10000}
+    assert meta["cost"]["wall_seconds"] > 0

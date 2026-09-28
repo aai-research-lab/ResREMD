@@ -119,3 +119,19 @@ def test_lengths_that_do_not_divide_are_refused(tmp_path, fast):
         resremd.run(testsystems.double_well(),
                     **{**settings(tmp_path, fast, 20),
                        "trajectory_interval_steps": 75})
+
+
+def test_cost_is_counted_across_sessions(tmp_path, fast):
+    m = resremd.run(testsystems.double_well(),
+                    **settings(tmp_path, fast, 20, equilibration_ns=0.001))
+    cost = m["cost"]
+    assert cost["md_steps"]["equilibration"] == 500 * 3
+    assert cost["md_steps"]["production"] == 20 * 50 * 3
+    assert cost["md_steps_total"] == 1500 + 3000
+    first = cost["wall_seconds"]["production"]
+    assert first > 0
+    m = resremd.run(testsystems.double_well(), **settings(
+        tmp_path, fast, 40, equilibration_ns=0.001, resume=True))
+    assert m["cost"]["md_steps"]["production"] == 40 * 50 * 3
+    assert m["cost"]["md_steps"]["equilibration"] == 1500
+    assert m["cost"]["wall_seconds"]["production"] > first

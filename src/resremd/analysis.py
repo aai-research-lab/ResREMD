@@ -42,6 +42,25 @@ def round_trips(states: np.ndarray, top: int) -> tuple[int, list[float]]:
     return trips, lengths
 
 
+def effective_ancestors(origins) -> float:
+    """How many independent reservoir structures a state's samples rest on.
+
+    ``origins`` is, for each sample, the reservoir frame its coordinates
+    descend from (-1 for the starting structure, which counts as one more
+    ancestor). The inverse Simpson index of the ancestor frequencies,
+    1 / sum p_k^2, is the number of equally represented ancestors that would
+    give the same concentration. Samples that share an ancestor share its
+    history, so this bounds the number of independent configurations the
+    ensemble was annealed from.
+    """
+    origins = np.asarray(origins).ravel()
+    if origins.size == 0:
+        return 0.0
+    _, counts = np.unique(origins, return_counts=True)
+    p = counts / counts.sum()
+    return float(1.0 / np.sum(p * p))
+
+
 def summarize(run_dir: str | Path) -> dict[str, Any]:
     run_dir = Path(run_dir)
     manifest = json.loads((run_dir / "manifest.json").read_text())
@@ -60,6 +79,7 @@ def summarize(run_dir: str | Path) -> dict[str, Any]:
                                  manifest["exchanges"]["neighbour_pairs"]],
         "round_trips": trips,
         "mean_round_trip_cycles": float(np.mean(lengths)) if lengths else None,
+        "cost": manifest.get("cost"),
     }
     visited = [len(set(states[:, r].tolist())) for r in range(n)]
     out["replicas_that_visited_every_state"] = int(sum(v == n for v in visited))
@@ -75,6 +95,7 @@ def summarize(run_dir: str | Path) -> dict[str, Any]:
             float(from_reservoir.mean())
         out["reservoir_frames_that_reached_lowest_state"] = \
             int(np.unique(lowest[from_reservoir]).size)
+        out["effective_reservoir_ancestors"] = effective_ancestors(lowest)
         exchanges = _table(run_dir / "reservoir_exchanges.csv")
         if exchanges.size:
             accepted = exchanges[:, -1]
@@ -112,5 +133,7 @@ def format_summary(summary: dict[str, Any]) -> str:
             f"{100 * summary['lowest_state_fraction_from_reservoir']:.1f}%",
             f"  distinct reservoir frames that reached the lowest temperature: "
             f"{summary['reservoir_frames_that_reached_lowest_state']}",
+            f"  effective number of reservoir ancestors at the lowest "
+            f"temperature: {summary['effective_reservoir_ancestors']:.1f}",
         ]
     return "\n".join(lines)

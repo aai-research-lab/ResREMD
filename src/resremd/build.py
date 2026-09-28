@@ -93,6 +93,8 @@ def generate(prepared: Prepared | str | Path | None = None, *,
             start_box = np.array(data["box"]) if "box" in data else None
         seed = saved["seed"]
         done = saved["frames"]
+        wall_before = float(saved.get("wall_seconds", 0.0))
+        eq_steps = int(saved.get("equilibration_steps", 0))
     else:
         if meta_file.exists():
             raise InputError(
@@ -107,6 +109,8 @@ def generate(prepared: Prepared | str | Path | None = None, *,
         seed = o["random_seed"] if o["random_seed"] is not None \
             else secrets.randbelow(2**31 - 1)
         done = 0
+        wall_before = 0.0
+        eq_steps = 0
         meta = base_metadata(
             kind="boltzmann", temperature_K=t, ensemble=ensemble,
             n_frames=n_frames, n_atoms=prep.n_atoms, periodic=prep.periodic,
@@ -121,6 +125,7 @@ def generate(prepared: Prepared | str | Path | None = None, *,
                     "friction_per_ps": o["friction_per_ps"],
                     "seed": int(seed)})
         write_json(meta_file, meta)
+    session_start = time.time()
     rng = np.random.default_rng([int(seed), 2, done])
     integrator = make_integrator(o["integrator"], t, o["friction_per_ps"], dt,
                                  int(rng.integers(1, 2**31 - 1)))
@@ -167,6 +172,7 @@ def generate(prepared: Prepared | str | Path | None = None, *,
         logger.info("Equilibrating at %g K (%d steps)", t, eq)
         if eq:
             integrator.step(eq)
+        eq_steps = eq
 
     per_checkpoint = max(1, int(round(500.0 / (interval * dt / 1000.0))))
     t0 = time.time()
@@ -190,7 +196,10 @@ def generate(prepared: Prepared | str | Path | None = None, *,
             if done % per_checkpoint == 0 or done == n_frames or stop.requested:
                 writer.flush()
                 potential.flush()
-                _save_build_checkpoint(chk_file, context, done, seed, periodic)
+                _save_build_checkpoint(
+                    chk_file, context, done, seed, periodic,
+                    wall_seconds=wall_before + time.time() - session_start,
+                    equilibration_steps=eq_steps)
                 rate = (done - start) * interval * dt / 1e6 / \
                     max(time.time() - t0, 1e-9) * 86400
                 logger.info("reservoir frame %d/%d  %.1f ns/day", done,
@@ -218,6 +227,13 @@ def generate(prepared: Prepared | str | Path | None = None, *,
     first = np.array(writer.positions[0], dtype=float)
     write_topology(out / "topology.pdb", prep.topology, first,
                    None if writer.box is None else np.array(writer.box[0]))
+    meta["cost"] = {
+        "md_steps": {"equilibration": eq_steps,
+                     "production": n_frames * interval},
+        "md_steps_total": eq_steps + n_frames * interval,
+        "wall_seconds": wall_before + time.time() - session_start,
+        "platform": platform,
+    }
     meta["complete"] = True
     write_json(meta_file, meta)
     chk_file.unlink(missing_ok=True)
@@ -227,7 +243,8 @@ def generate(prepared: Prepared | str | Path | None = None, *,
 
 
 def _save_build_checkpoint(path: Path, context: Any, frames: int, seed: int,
-                           periodic: bool) -> None:
+                           periodic: bool, *, wall_seconds: float,
+                           equilibration_steps: int) -> None:
     state = context.getState(getPositions=True, getVelocities=True)
     arrays = {
         "positions": np.asarray(state.getPositions(asNumpy=True)._value),
@@ -238,9 +255,10 @@ def _save_build_checkpoint(path: Path, context: Any, frames: int, seed: int,
             asNumpy=True)._value)
     tmp = path.with_name(path.name + ".tmp.npz")
     with open(tmp, "wb") as fh:
-        np.savez(fh, meta=np.array(json.dumps({"frames": frames,
-                                                "seed": int(seed)})),
-                 **arrays)
+        np.savez(fh, meta=np.array(json.dumps({
+            "frames": frames, "seed": int(seed),
+            "wall_seconds": wall_seconds,
+            "equilibration_steps": int(equilibration_steps)})), **arrays)
         fh.flush()
         os.fsync(fh.fileno())
     os.replace(tmp, path)

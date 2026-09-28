@@ -281,7 +281,12 @@ class _Run:
         # energies are computed or replicas equilibrate is honoured too.
         with StopRequests() as self.stop:
             try:
+                self.cost = (saved["meta"].get("cost") if saved else None) \
+                    or _new_cost()
+                clock = time.time()
                 self._reservoir_energies()
+                self.cost["wall_seconds"]["reservoir_energies"] += \
+                    time.time() - clock
                 if saved is None:
                     if self.stop.requested:
                         logger.warning("Stopped before equilibration; there "
@@ -348,6 +353,8 @@ class _Run:
                     "(%d steps)", eq)
         t0 = time.time()
         self.engine.run(self.replicas, self._temps(), eq, set())
+        self.cost["wall_seconds"]["equilibration"] += time.time() - t0
+        self.cost["md_steps"]["equilibration"] += eq * n
         logger.info("Equilibrated in %.0f s", time.time() - t0)
         write_pdb(self.out / "topology.pdb", self.save_topology,
                   positions[self.save_atoms])
@@ -472,6 +479,14 @@ class _Run:
 
     # -- checkpoints and the record -----------------------------------------
     def _checkpoint(self, status: str) -> None:
+        now = time.time()
+        if getattr(self, "_production_clock", None) is not None:
+            self.cost["wall_seconds"]["production"] += \
+                now - self._production_clock
+            self._production_clock = now
+        self.cost["md_steps"]["production"] = (
+            self.cycle * self.options["exchange_interval_steps"]
+            * len(self.replicas))
         self.engine.gather(self.replicas)
         sizes = self._flush_files()
         meta = {
@@ -489,6 +504,7 @@ class _Run:
             "files": sizes,
             "fingerprint": self.fingerprint,
             "started": self.started,
+            "cost": self.cost,
         }
         arrays = {
             "positions": np.stack([r.positions for r in self.replicas]),
@@ -576,6 +592,14 @@ class _Run:
                 },
             },
             "engine": {**self.engine.describe(), "seed": self.seed},
+            "cost": {
+                **self.cost,
+                "md_steps_total": sum(self.cost["md_steps"].values()),
+                "note": "MD steps summed over replicas. Wall time is summed "
+                        "over every session of the run, on the hardware in "
+                        "`engine`. A reservoir's own cost is in its "
+                        "reservoir.json.",
+            },
             "settings": {**o, **self.plan},
             "warnings": self.warnings,
             "files": {"topology": "topology.pdb", "log": "run.log", **files},
@@ -596,6 +620,7 @@ class _Run:
         log_every = max(1, min(target // 20 or 1, round(100.0 / (interval * dt
                                                                   / 1000.0))))
         t_start = time.time()
+        self._production_clock = t_start
         c_start = self.cycle
         status = "complete"
         stop = self.stop
@@ -708,6 +733,13 @@ class _Run:
         logger.info(text)
         if self.on_progress:
             self.on_progress(info)
+
+
+def _new_cost() -> dict[str, Any]:
+    """What a run has spent: MD steps over all replicas, and wall time."""
+    return {"md_steps": {"equilibration": 0, "production": 0},
+            "wall_seconds": {"reservoir_energies": 0.0, "equilibration": 0.0,
+                             "production": 0.0}}
 
 
 #: What a run writes before its first checkpoint. A directory holding only
