@@ -1,0 +1,27 @@
+# Minutes on a CPU: checks the whole harness end to end.
+name: smoke
+system: {name: double_well}
+temperatures_K: [300.0, 360.0, 432.0]
+seeds: [1, 2]
+run:
+  production_steps: 500000
+  exchange_interval_steps: 250
+  trajectory_interval_steps: 250
+  friction_per_ps: 5.0
+  equilibration_ns: 0.0
+  minimize: false
+  save_selection: all
+  platform: Reference
+methods:
+  - name: remd
+  - name: resremd_exact
+    reservoir:
+      exact: {kind: boltzmann, temperature_K: 520.0, n_frames: 5000}
+  - name: resremd_generated
+    reservoir:
+      generate: {temperature_K: 520.0, duration_ns: 1.0,
+                 frame_interval_steps: 250, equilibration_ns: 0.01,
+                 friction_per_ps: 5.0, platform: Reference}
+reference: {kind: exact}
+analysis: {threshold_tv: 0.05, points: 20}
+slurm: {gres: null}

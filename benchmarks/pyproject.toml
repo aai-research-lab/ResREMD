@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "resremd-benchmarks"
+version = "0.1.0"
+description = "Benchmarks for reservoir replica exchange (resremd)"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = ["reservoir-remd", "mdtraj>=1.9.7", "pyyaml>=6.0", "numpy"]
+
+[project.optional-dependencies]
+plots = ["matplotlib>=3.5"]
+test = ["pytest>=7"]
+
+[project.scripts]
+resbench = "resbench.__main__:main"
+
+[tool.setuptools]
+packages = ["resbench"]

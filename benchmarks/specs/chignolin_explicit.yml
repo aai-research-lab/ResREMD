@@ -1,0 +1,33 @@
+# Tier 3, explicit solvent: the expensive case. CLN025 in TIP3P-FB at
+# constant volume. Pilot the ladder before committing GPU-weeks.
+name: chignolin_explicit
+# Padding 1.4 nm: extended conformations must stay beyond the cutoff from
+# their own periodic images.
+system: {name: chignolin, solvent: explicit, pdb: 5AWL.pdb, padding_nm: 1.4,
+         npt_ns: 2.0, folded_rmsd_nm: 0.2, unfolded_rmsd_nm: 0.5}
+# Twenty rungs of a geometric ladder whose twenty-first, 440 K, is the
+# reservoir.
+temperatures_K: [300.0, 305.8, 311.7, 317.7, 323.9, 330.1, 336.5, 343.0,
+                 349.7, 356.4, 363.3, 370.3, 377.5, 384.8, 392.2, 399.8,
+                 407.6, 415.4, 423.5, 431.7]
+seeds: [1, 2]
+run:
+  duration_ns: 500
+  exchange_interval_steps: 1000
+  trajectory_interval_steps: 10000
+  equilibration_ns: 1.0
+  save_selection: solute
+  save_states: lowest
+  platform: CUDA
+methods:
+  - name: remd
+  - name: resremd
+    reservoir:
+      generate: {temperature_K: 440.0, duration_ns: 2000,
+                 frame_interval_steps: 10000, equilibration_ns: 5.0,
+                 platform: CUDA}
+reference: {kind: pooled, methods: [remd, resremd]}
+analysis: {threshold_tv: 0.03, threshold_jsd: 0.03}
+slurm: {partition: normal, gres: "gpu:1", cpus_per_task: 4,
+        setup: ["source ~/miniforge3/etc/profile.d/conda.sh",
+                "conda activate resremd"]}

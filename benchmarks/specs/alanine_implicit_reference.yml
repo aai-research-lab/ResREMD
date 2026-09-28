@@ -1,0 +1,19 @@
+# Reference for alanine_implicit: long plain REMD, independent of any
+# reservoir, on the same ladder, from both starts. Then:
+#   resbench reference bench_ala_ref alanine_implicit_reference.json
+name: alanine_implicit_reference
+system: {name: alanine_dipeptide, solvent: implicit}
+temperatures_K: [300.0, 332.0, 367.42, 406.62]
+seeds: [101, 102, 103, 104]
+equal_cost: false
+run:
+  duration_ns: 500
+  exchange_interval_steps: 500
+  trajectory_interval_steps: 5000
+  equilibration_ns: 1.0
+  save_selection: solute
+  save_states: lowest
+  platform: auto
+methods:
+  - name: remd
+reference: {kind: pooled, methods: [remd]}

@@ -1,0 +1,25 @@
+# Tier 3. CLN025 (PDB 5AWL), Amber14 in GBn2. Starts folded and unfolded.
+# Fetch the structure on a machine with internet first:
+#   curl -o 5AWL.pdb https://files.rcsb.org/download/5AWL.pdb
+name: chignolin_implicit
+system: {name: chignolin, solvent: implicit, pdb: 5AWL.pdb,
+         folded_rmsd_nm: 0.2, unfolded_rmsd_nm: 0.5}
+# Eight rungs of a geometric ladder whose ninth, 470 K, is the reservoir.
+temperatures_K: [300.0, 317.3, 335.6, 355.0, 375.5, 397.2, 420.1, 444.4]
+seeds: [1, 2, 3]
+run:
+  duration_ns: 200
+  exchange_interval_steps: 500
+  trajectory_interval_steps: 5000
+  equilibration_ns: 1.0
+  save_selection: solute
+  save_states: lowest
+  platform: auto
+methods:
+  - name: remd
+  - name: resremd
+    reservoir:
+      generate: {temperature_K: 470.0, duration_ns: 500,
+                 frame_interval_steps: 5000, equilibration_ns: 5.0}
+reference: {kind: file, path: chignolin_implicit_reference.json}
+analysis: {threshold_tv: 0.03, threshold_jsd: 0.03}

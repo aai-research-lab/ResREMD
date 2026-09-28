@@ -203,6 +203,34 @@ pytest                 # about a minute
 pytest -m slow         # longer statistical runs
 ```
 
+## Diagnostics
+
+`resremd summary` reports, besides acceptance and round trips:
+
+- **Reservoir ensemble check.** The top replica's enthalpies and the
+  reservoir's must satisfy ln[P_top(h)/P_R(h)] = const - (beta_top - beta_R) h,
+  whatever the density of states (Shirts, *J. Chem. Theory Comput.* 2013).
+  The check gives a z-score and the temperature the reservoir's frames
+  actually behave like, so a reservoir drawn at another temperature than its
+  label, or missing part of its ensemble, is caught without a reference.
+- **Lineage.** How many of the lowest-temperature samples descend from
+  reservoir frames, how many distinct frames reached the bottom, and the
+  effective number of independent reservoir ancestors behind the ensemble.
+- **Cost.** MD steps and wall time per phase, summed over sessions, in the
+  manifest (and a reservoir's own cost in its `reservoir.json`).
+
+A reservoir that never converged at its own temperature passes the ensemble
+check. Runs that share it then agree with each other and are wrong
+together. The benchmark harness checks this separately, by comparing the
+reservoir's two halves.
+
+## Benchmarks
+
+`benchmarks/` holds a harness that compares reservoir REMD with plain REMD
+at equal cost, on exact models, alanine dipeptide and chignolin. It covers
+flawed reservoirs, runs from opposite starts, and SLURM job arrays. See
+`benchmarks/README.md`.
+
 ## Use from FastMDXplora
 
 Settings are declared once, in `resremd.options`, in the shape of

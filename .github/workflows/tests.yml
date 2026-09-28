@@ -27,3 +27,7 @@ jobs:
         run: python -m pip install -e ".[test]"
       - name: Test
         run: python -m pytest -m "not slow" -q
+      - name: Benchmark harness
+        run: |
+          python -m pip install -e ./benchmarks
+          cd benchmarks && python -m pytest -q tests

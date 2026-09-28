@@ -1,0 +1,30 @@
+# Tier 2, explicit solvent. Constant volume at the density equilibrated at
+# 300 K. Check the ladder with a short pilot first (`resremd summary` on one
+# run): aim for 20 to 40 percent neighbour acceptance.
+name: alanine_explicit
+system: {name: alanine_dipeptide, solvent: explicit, padding_nm: 1.2,
+         npt_ns: 1.0}
+# Fourteen rungs of a geometric ladder whose fifteenth, 440 K, is the
+# reservoir.
+temperatures_K: [300.0, 308.3, 316.9, 325.7, 334.7, 344.0, 353.5, 363.3,
+                 373.4, 383.8, 394.4, 405.3, 416.6, 428.1]
+seeds: [1, 2, 3]
+run:
+  duration_ns: 20
+  exchange_interval_steps: 500
+  trajectory_interval_steps: 500
+  equilibration_ns: 0.2
+  save_selection: solute
+  save_states: lowest
+  platform: auto
+methods:
+  - name: remd
+  - name: resremd
+    reservoir:
+      generate: {temperature_K: 440.0, duration_ns: 100,
+                 frame_interval_steps: 2500}
+# Pooled from both methods' final halves, each run left out of its own
+# reference. Cheaper than separate reference runs; check the precision
+# warning in the analysis.
+reference: {kind: pooled, methods: [remd, resremd]}
+analysis: {threshold_tv: 0.02, threshold_jsd: 0.02}

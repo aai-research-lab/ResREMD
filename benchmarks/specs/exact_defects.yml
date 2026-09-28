@@ -1,0 +1,63 @@
+# Tier 1. Reservoirs with known flaws, on a model whose answer is exact.
+# Each method differs from `res_exact` in one thing. CPU only: about an
+# hour on one core for the whole matrix.
+name: exact_defects
+description: >
+  Which reservoir flaws bias replica exchange, by how much, and which
+  diagnostics notice. Starts in the disfavoured well (right) and in the
+  favoured one (left).
+system: {name: double_well}
+temperatures_K: [300.0, 360.0, 432.0]
+seeds: [1, 2, 3, 4, 5]
+run:
+  production_steps: 10000000        # 20 ns per replica
+  exchange_interval_steps: 250
+  trajectory_interval_steps: 250
+  friction_per_ps: 5.0
+  equilibration_ns: 0.0
+  minimize: false
+  save_selection: all
+  platform: Reference
+# Equal cost (the default): methods with no reservoir cost run longer, so
+# every run spends what `res_generated` spends, its reservoir included.
+methods:
+  - name: remd
+    note: no reservoir; the barrier is crossed only by the ladder itself
+  - name: remd_plus
+    note: plain REMD with the reservoir's temperature as a fourth rung
+    temperatures_K: [300.0, 360.0, 432.0, 520.0]
+  - name: res_exact
+    reservoir:
+      exact: {kind: boltzmann, temperature_K: 520.0, n_frames: 20000}
+  - name: res_50_frames
+    reservoir:
+      exact: {kind: boltzmann, temperature_K: 520.0, n_frames: 50}
+  - name: res_missing_left
+    note: the favoured well is absent from the reservoir
+    reservoir:
+      exact: {kind: boltzmann, temperature_K: 520.0, n_frames: 20000,
+              drop_state: left}
+  - name: res_mislabelled
+    note: drawn at 700 K, labelled 520 K
+    reservoir:
+      exact: {kind: boltzmann, temperature_K: 520.0,
+              sampled_temperature_K: 700.0, n_frames: 20000}
+  - name: res_hot
+    note: correctly labelled but far above the ladder
+    reservoir:
+      exact: {kind: boltzmann, temperature_K: 900.0, n_frames: 20000}
+  - name: res_uniform
+    note: non-Boltzmann reservoir, equal weights over the region
+    reservoir:
+      exact: {kind: non_boltzmann, n_frames: 20000}
+  - name: res_generated
+    note: >
+      a real reservoir: 20000 frames, as res_exact, but simulated at 520 K
+      from the run's own start, so correlated; its cost is counted
+    reservoir:
+      generate: {temperature_K: 520.0, duration_ns: 20.0,
+                 frame_interval_steps: 500, equilibration_ns: 0.1,
+                 friction_per_ps: 5.0, platform: Reference}
+reference: {kind: exact}
+analysis: {threshold_tv: 0.02, threshold_jsd: 0.01, points: 40}
+slurm: {gres: null, cpus_per_task: 1}

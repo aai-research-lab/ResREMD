@@ -1,0 +1,20 @@
+# Reference for chignolin_implicit: long plain REMD from both starts,
+# independent of any reservoir. Then:
+#   resbench reference bench_chig_ref chignolin_implicit_reference.json
+name: chignolin_implicit_reference
+system: {name: chignolin, solvent: implicit, pdb: 5AWL.pdb,
+         folded_rmsd_nm: 0.2, unfolded_rmsd_nm: 0.5}
+temperatures_K: [300.0, 317.3, 335.6, 355.0, 375.5, 397.2, 420.1, 444.4]
+seeds: [101, 102, 103]
+equal_cost: false
+run:
+  duration_ns: 2000
+  exchange_interval_steps: 500
+  trajectory_interval_steps: 10000
+  equilibration_ns: 1.0
+  save_selection: solute
+  save_states: lowest
+  platform: auto
+methods:
+  - name: remd
+reference: {kind: pooled, methods: [remd]}

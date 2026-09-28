@@ -1,0 +1,35 @@
+# Tier 2. Alanine dipeptide, Amber14 in GBn2. A few GPU-hours.
+name: alanine_implicit
+system: {name: alanine_dipeptide, solvent: implicit}
+# Four rungs of the geometric ladder whose fifth rung, 450 K, is the
+# reservoir: resremd ladder --temperature-min-K 300 --temperature-max-K 450
+# --n-replicas 5
+temperatures_K: [300.0, 332.0, 367.42, 406.62]
+seeds: [1, 2, 3, 4, 5]
+run:
+  duration_ns: 20
+  exchange_interval_steps: 500
+  trajectory_interval_steps: 500
+  equilibration_ns: 0.1
+  save_selection: solute
+  platform: auto
+methods:
+  - name: remd
+  - name: resremd
+    reservoir:
+      generate: {temperature_K: 450.0, duration_ns: 50,
+                 frame_interval_steps: 2500}
+  - name: resremd_short
+    note: a reservoir a fifth the length
+    reservoir:
+      generate: {temperature_K: 450.0, duration_ns: 10,
+                 frame_interval_steps: 500}
+  - name: resremd_hot
+    note: the same ladder, a reservoir far above it
+    reservoir:
+      generate: {temperature_K: 600.0, duration_ns: 50,
+                 frame_interval_steps: 2500}
+# The reference comes from independent long runs (alanine_implicit_reference
+# .yml): resbench reference bench_ala_ref alanine_implicit_reference.json
+reference: {kind: file, path: alanine_implicit_reference.json}
+analysis: {threshold_tv: 0.02, threshold_jsd: 0.02}
