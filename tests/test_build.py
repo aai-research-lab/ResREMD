@@ -106,3 +106,20 @@ def test_generate_records_its_cost(tmp_path):
     assert meta["cost"]["md_steps"] == {"equilibration": 1000,
                                         "production": 10000}
     assert meta["cost"]["wall_seconds"] > 0
+
+
+def test_a_build_killed_before_its_first_checkpoint_starts_over(tmp_path):
+    out = tmp_path / "r"
+    out.mkdir()
+    (out / "reservoir.json").write_text('{"complete": false}')
+    (out / "positions.npy").write_bytes(b"partial")
+    meta = resremd.generate_reservoir(
+        testsystems.double_well(), output=str(out), temperature_K=520.0,
+        duration_ns=0.004, frame_interval_steps=100, equilibration_ns=0.0,
+        platform="Reference", random_seed=2)
+    assert meta["complete"] and meta["n_frames"] == 20
+    with pytest.raises(InputError, match="already holds"):
+        resremd.generate_reservoir(
+            testsystems.double_well(), output=str(out), temperature_K=520.0,
+            duration_ns=0.004, frame_interval_steps=100,
+            equilibration_ns=0.0, platform="Reference", random_seed=2)

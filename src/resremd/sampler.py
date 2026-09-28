@@ -288,13 +288,17 @@ class _Run:
                 self.cost["wall_seconds"]["reservoir_energies"] += \
                     time.time() - clock
                 if saved is None:
-                    if self.stop.requested:
-                        logger.warning("Stopped before equilibration; there "
-                                       "is nothing to resume. Start again.")
+                    try:
+                        if self.stop.requested:
+                            raise _StoppedEarly
+                        self._start_fresh()
+                    except _StoppedEarly:
+                        logger.warning("Stopped before equilibration "
+                                       "finished; there is nothing to "
+                                       "resume. Start the run again.")
                         self.manifest = {"status": "stopped",
                                          "progress": None}
                         return self.manifest
-                    self._start_fresh()
                 else:
                     self._start_from(saved)
                 self._loop()
@@ -355,7 +359,17 @@ class _Run:
         logger.info("Equilibrating each replica at its own temperature "
                     "(%d steps)", eq)
         t0 = time.time()
-        self.engine.run(self.replicas, self._temps(), eq, set())
+        # In pieces of 10 ps, so a stop request is answered promptly.
+        piece = max(1, int(round(1e4 / o["timestep_fs"])))
+        left = eq
+        while True:  # at least once: zero steps still places every replica
+            if self.stop.requested:
+                raise _StoppedEarly
+            step = min(piece, left)
+            self.engine.run(self.replicas, self._temps(), step, set())
+            left -= step
+            if left <= 0:
+                break
         self.cost["wall_seconds"]["equilibration"] += time.time() - t0
         self.cost["md_steps"]["equilibration"] += eq * n
         logger.info("Equilibrated in %.0f s", time.time() - t0)
@@ -736,6 +750,10 @@ class _Run:
         logger.info(text)
         if self.on_progress:
             self.on_progress(info)
+
+
+class _StoppedEarly(Exception):
+    """A stop was requested before the first checkpoint existed."""
 
 
 def _new_cost() -> dict[str, Any]:

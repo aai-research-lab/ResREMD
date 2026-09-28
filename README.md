@@ -207,22 +207,27 @@ pytest -m slow         # longer statistical runs
 
 `resremd summary` reports, besides acceptance and round trips:
 
-- **Reservoir ensemble check.** The top replica's enthalpies and the
+- **Reservoir temperature check.** The top replica's enthalpies and the
   reservoir's must satisfy ln[P_top(h)/P_R(h)] = const - (beta_top - beta_R) h,
   whatever the density of states (Shirts, *J. Chem. Theory Comput.* 2013).
-  The check gives a z-score and the temperature the reservoir's frames
-  actually behave like, so a reservoir drawn at another temperature than its
-  label, or missing part of its ensemble, is caught without a reference.
+  The check gives a z-score (block-bootstrap errors) and the temperature
+  the reservoir's frames actually behave like, so frames drawn at another
+  temperature than their label are caught without a reference. It cannot
+  see a reservoir that is missing part of its ensemble: the relation holds
+  between two equally restricted ensembles, and the top replica, fed by the
+  reservoir, inherits the restriction.
 - **Lineage.** How many of the lowest-temperature samples descend from
   reservoir frames, how many distinct frames reached the bottom, and the
   effective number of independent reservoir ancestors behind the ensemble.
 - **Cost.** MD steps and wall time per phase, summed over sessions, in the
   manifest (and a reservoir's own cost in its `reservoir.json`).
 
-A reservoir that never converged at its own temperature passes the ensemble
-check. Runs that share it then agree with each other and are wrong
-together. The benchmark harness checks this separately, by comparing the
-reservoir's two halves.
+A reservoir that never converged at its own temperature also passes the
+temperature check. The benchmark harness catches that separately, by
+comparing the reservoir's two halves. A reservoir with a state entirely
+missing passes both; only an independent reference exposes it, which is
+why a reservoir must come from a simulation long enough to have visited
+everything that matters at its temperature.
 
 ## Benchmarks
 

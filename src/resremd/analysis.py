@@ -61,39 +61,12 @@ def effective_ancestors(origins) -> float:
     return float(1.0 / np.sum(p * p))
 
 
-def ensemble_check(top_h, reservoir_h, beta_top: float, beta_reservoir: float,
-                   *, reservoir_weights=None, bins: int = 20,
-                   min_count: int = 10) -> dict[str, Any] | None:
-    """Do the top replica and the reservoir sample the ensembles they claim?
+def _slope_fit(top_h, res_h, w, edges, min_count, g_t=1.0, g_r=1.0):
+    """Weighted straight-line fit of ln(P_top / P_R) against h.
 
-    For two samples of one system at inverse temperatures beta_t and
-    beta_R, the ratio of their enthalpy distributions is exactly
-
-        ln[P_t(h) / P_R(h)] = const - (beta_t - beta_R) h
-
-    whatever the density of states (Shirts, J. Chem. Theory Comput. 2013,
-    9, 909). A straight-line fit over the energies both visit gives a slope;
-    its departure from beta_t - beta_R, in standard errors, is ``z``, and
-    the temperature the slope implies for the reservoir is
-    ``reservoir_temperature_implied_K``. A reservoir drawn at another
-    temperature than its label, or missing part of its ensemble, fails;
-    a non-Boltzmann reservoir is checked as beta_R = 0.
-
-    Errors are inflated by each series' statistical inefficiency. Returns
-    None when the two distributions overlap too little to fit.
+    Returns (slope, analytic standard error, bins used), or None when fewer
+    than three bins hold enough samples on both sides.
     """
-    from .statistics import statistical_inefficiency
-    from .thermo import BOLTZ
-
-    top_h = np.asarray(top_h, dtype=float)
-    res_h = np.asarray(reservoir_h, dtype=float)
-    w = np.ones_like(res_h) if reservoir_weights is None \
-        else np.asarray(reservoir_weights, dtype=float)
-    lo = max(np.quantile(top_h, 0.005), np.quantile(res_h, 0.005))
-    hi = min(np.quantile(top_h, 0.995), np.quantile(res_h, 0.995))
-    if not hi > lo:
-        return None
-    edges = np.linspace(lo, hi, bins + 1)
     n_t = np.histogram(top_h, edges)[0].astype(float)
     n_r = np.histogram(res_h, edges, weights=w)[0]
     # Effective counts for a weighted histogram (Kish), so the error of a
@@ -103,26 +76,98 @@ def ensemble_check(top_h, reservoir_h, beta_top: float, beta_reservoir: float,
     keep = (n_t >= min_count) & (n_r_eff >= min_count)
     if keep.sum() < 3:
         return None
-    g_t = statistical_inefficiency(top_h)
-    g_r = statistical_inefficiency(res_h)
     centres = 0.5 * (edges[1:] + edges[:-1])[keep]
     y = np.log(n_t[keep] / n_t.sum()) - np.log(n_r[keep] / n_r.sum())
     var = g_t * (1 / n_t[keep] - 1 / n_t.sum()) + \
         g_r * (1 / n_r_eff[keep] - 1 / n_r_eff.sum())
     wt = 1.0 / var
     x0 = np.sum(wt * centres) / np.sum(wt)
-    slope = np.sum(wt * (centres - x0) * y) / np.sum(wt * (centres - x0) ** 2)
-    slope_err = float(np.sqrt(1.0 / np.sum(wt * (centres - x0) ** 2)))
+    sxx = np.sum(wt * (centres - x0) ** 2)
+    slope = np.sum(wt * (centres - x0) * y) / sxx
+    return float(slope), float(np.sqrt(1.0 / sxx)), int(keep.sum())
+
+
+def _blocks(n: int, length: int, rng) -> np.ndarray:
+    """Indices of a moving-block bootstrap resample of a series of n."""
+    length = max(1, min(length, n))
+    starts = rng.integers(0, n - length + 1, size=int(np.ceil(n / length)))
+    return (starts[:, None] + np.arange(length)[None]).ravel()[:n]
+
+
+def ensemble_check(top_h, reservoir_h, beta_top: float, beta_reservoir: float,
+                   *, reservoir_weights=None, bins: int = 20,
+                   min_count: int = 10, bootstrap: int = 200,
+                   seed: int = 0) -> dict[str, Any]:
+    """Is the reservoir a sample at the temperature it claims?
+
+    For two samples of one system at inverse temperatures beta_t and
+    beta_R, the ratio of their enthalpy distributions is exactly
+
+        ln[P_t(h) / P_R(h)] = const - (beta_t - beta_R) h
+
+    whatever the density of states (Shirts, J. Chem. Theory Comput. 2013,
+    9, 909). A straight-line fit over the energies both visit gives a slope;
+    its departure from -(beta_t - beta_R), in standard errors, is ``z``, and
+    the temperature the slope implies for the reservoir is
+    ``reservoir_temperature_implied_K``. A non-Boltzmann reservoir is
+    checked as beta_R = 0.
+
+    What it catches: frames drawn at another temperature than their label.
+    What it cannot catch: a reservoir missing part of its ensemble, or one
+    whose simulation never converged. The relation above holds just as well
+    between two ensembles restricted to the same region, and the top
+    replica, fed by the reservoir, takes on its restriction.
+
+    The standard error is the larger of the fit's own (with each bin's
+    variance inflated by the series' statistical inefficiency) and a
+    moving-block bootstrap over both series, which also covers bins that
+    rise and fall together with a slow mode.
+
+    ``status`` is ``ok``, ``too_few_frames`` or ``no_overlap``; the
+    numbers are present only when it is ``ok``.
+    """
+    from .statistics import statistical_inefficiency
+    from .thermo import BOLTZ
+
+    top_h = np.asarray(top_h, dtype=float)
+    res_h = np.asarray(reservoir_h, dtype=float)
+    w = np.ones_like(res_h) if reservoir_weights is None \
+        else np.asarray(reservoir_weights, dtype=float)
+    if top_h.size < 3 * min_count or res_h.size < 3 * min_count:
+        return {"status": "too_few_frames"}
+    lo = max(np.quantile(top_h, 0.005), np.quantile(res_h, 0.005))
+    hi = min(np.quantile(top_h, 0.995), np.quantile(res_h, 0.995))
+    if not hi > lo:
+        return {"status": "no_overlap"}
+    edges = np.linspace(lo, hi, bins + 1)
+    g_t = statistical_inefficiency(top_h)
+    g_r = statistical_inefficiency(res_h)
+    fit = _slope_fit(top_h, res_h, w, edges, min_count, g_t, g_r)
+    if fit is None:
+        return {"status": "no_overlap" if res_h.size >= 10 * min_count
+                else "too_few_frames"}
+    slope, se_fit, used = fit
+    rng = np.random.default_rng(seed)
+    boots = []
+    for _ in range(bootstrap):
+        it = _blocks(top_h.size, int(np.ceil(2 * g_t)), rng)
+        ir = _blocks(res_h.size, int(np.ceil(2 * g_r)), rng)
+        b = _slope_fit(top_h[it], res_h[ir], w[ir], edges, min_count)
+        if b is not None:
+            boots.append(b[0])
+    se_boot = float(np.std(boots, ddof=1)) if len(boots) > 10 else 0.0
+    se = max(se_fit, se_boot)
     expected = -(beta_top - beta_reservoir)
     implied_beta = beta_top + slope
     return {
-        "slope": float(slope), "slope_stderr": slope_err,
+        "status": "ok",
+        "slope": slope, "slope_stderr": se,
+        "slope_stderr_fit": se_fit, "slope_stderr_bootstrap": se_boot,
         "expected_slope": float(expected),
-        "z": float((slope - expected) / slope_err),
+        "z": float((slope - expected) / se),
         "reservoir_temperature_implied_K":
-            float(1.0 / (BOLTZ * implied_beta)) if implied_beta > 0
-            else float("inf"),
-        "bins_used": int(keep.sum()),
+            float(1.0 / (BOLTZ * implied_beta)) if implied_beta > 0 else None,
+        "bins_used": used,
         "statistical_inefficiency": {"top": g_t, "reservoir": g_r},
     }
 
@@ -164,7 +209,7 @@ def reservoir_check(run_dir: str | Path) -> dict[str, Any] | None:
         return None
     res_h = _reservoir_enthalpy(run_dir, manifest)
     if res_h is None:
-        return None
+        return {"status": "no_energies"}
     states = _table(run_dir / "states.csv")[:, 2:].astype(int)
     energies = _table(run_dir / "energies.csv")[:, 2:]
     top = states.shape[1] - 1
@@ -262,13 +307,19 @@ def format_summary(summary: dict[str, Any]) -> str:
             f"temperature: {summary['effective_reservoir_ancestors']:.1f}",
         ]
         check = summary.get("reservoir_check")
-        if check and "z" in check:
+        if check and check.get("status") == "ok":
             verdict = "consistent" if abs(check["z"]) < 3 else "INCONSISTENT"
+            implied = check["reservoir_temperature_implied_K"]
+            like = (f"{implied:.0f} K" if implied is not None
+                    else "no finite temperature")
             lines.append(
-                f"  reservoir ensemble check: {verdict} (z = {check['z']:+.1f}"
-                f"; its energies look like "
-                f"{check['reservoir_temperature_implied_K']:.0f} K)")
+                f"  reservoir temperature check: {verdict} (z = "
+                f"{check['z']:+.1f}; its energies look like {like})")
         elif check is not None:
-            lines.append("  reservoir ensemble check: not enough overlap "
-                         "between the top replica and the reservoir")
+            why = {"too_few_frames": "too few frames to test",
+                   "no_overlap": "the top replica and the reservoir share "
+                                 "too few energies",
+                   "no_energies": "the reservoir energies were not found"}.get(
+                check.get("status"), check.get("error", "not available"))
+            lines.append(f"  reservoir temperature check: {why}")
     return "\n".join(lines)

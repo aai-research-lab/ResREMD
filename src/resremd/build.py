@@ -95,7 +95,13 @@ def generate(prepared: Prepared | str | Path | None = None, *,
         done = saved["frames"]
         wall_before = float(saved.get("wall_seconds", 0.0))
         eq_steps = int(saved.get("equilibration_steps", 0))
+        eq_left = int(saved.get("equilibration_left", 0))
     else:
+        if meta_file.exists() and not chk_file.exists() and not json.loads(
+                meta_file.read_text()).get("complete"):
+            # Killed before its first checkpoint: nothing to resume, and
+            # nothing worth keeping. Clear what this build wrote and start.
+            _clear_unfinished_build(out)
         if meta_file.exists():
             raise InputError(
                 f"{out} already holds a reservoir"
@@ -168,17 +174,29 @@ def generate(prepared: Prepared | str | Path | None = None, *,
             openmm.LocalEnergyMinimizer.minimize(context)
         context.setVelocitiesToTemperature(t * unit.kelvin,
                                            int(rng.integers(1, 2**31 - 1)))
-        eq = int(round(o["equilibration_ns"] * 1e6 / dt))
-        logger.info("Equilibrating at %g K (%d steps)", t, eq)
-        if eq:
-            integrator.step(eq)
-        eq_steps = eq
+        eq_left = int(round(o["equilibration_ns"] * 1e6 / dt))
+        logger.info("Equilibrating at %g K (%d steps)", t, eq_left)
 
     per_checkpoint = max(1, int(round(500.0 / (interval * dt / 1000.0))))
     t0 = time.time()
     start = done
     status = "complete"
     with StopRequests() as stop:
+        # In pieces, so a stop request during a long equilibration is
+        # answered within 10 ps and the rest of it is resumed later.
+        piece = max(1, int(round(1e4 / dt)))
+        while eq_left > 0 and not stop.requested:
+            n = min(piece, eq_left)
+            integrator.step(n)
+            eq_left -= n
+            eq_steps += n
+        if stop.requested and done < n_frames:
+            _save_build_checkpoint(
+                chk_file, context, done, seed, periodic,
+                wall_seconds=wall_before + time.time() - session_start,
+                equilibration_steps=eq_steps, equilibration_left=eq_left)
+            logger.info("Stopped during equilibration. Resume with `resume`.")
+            return meta
         for k in range(done, n_frames):
             integrator.step(interval)
             state = context.getState(getPositions=True, getEnergy=True)
@@ -199,7 +217,7 @@ def generate(prepared: Prepared | str | Path | None = None, *,
                 _save_build_checkpoint(
                     chk_file, context, done, seed, periodic,
                     wall_seconds=wall_before + time.time() - session_start,
-                    equilibration_steps=eq_steps)
+                    equilibration_steps=eq_steps, equilibration_left=0)
                 rate = (done - start) * interval * dt / 1e6 / \
                     max(time.time() - t0, 1e-9) * 86400
                 logger.info("reservoir frame %d/%d  %.1f ns/day", done,
@@ -242,9 +260,22 @@ def generate(prepared: Prepared | str | Path | None = None, *,
     return meta
 
 
+_BUILD_FILES = ("reservoir.json", "positions.npy", "box.npy",
+                "build_potential_kjmol.npy")
+
+
+def _clear_unfinished_build(out: Path) -> None:
+    """Remove what an interrupted build wrote, and only that."""
+    for name in _BUILD_FILES:
+        (out / name).unlink(missing_ok=True)
+    for tmp in out.glob("*.tmp*"):
+        tmp.unlink()
+
+
 def _save_build_checkpoint(path: Path, context: Any, frames: int, seed: int,
                            periodic: bool, *, wall_seconds: float,
-                           equilibration_steps: int) -> None:
+                           equilibration_steps: int,
+                           equilibration_left: int) -> None:
     state = context.getState(getPositions=True, getVelocities=True)
     arrays = {
         "positions": np.asarray(state.getPositions(asNumpy=True)._value),
@@ -258,7 +289,8 @@ def _save_build_checkpoint(path: Path, context: Any, frames: int, seed: int,
         np.savez(fh, meta=np.array(json.dumps({
             "frames": frames, "seed": int(seed),
             "wall_seconds": wall_seconds,
-            "equilibration_steps": int(equilibration_steps)})), **arrays)
+            "equilibration_steps": int(equilibration_steps),
+            "equilibration_left": int(equilibration_left)})), **arrays)
         fh.flush()
         os.fsync(fh.fileno())
     os.replace(tmp, path)
