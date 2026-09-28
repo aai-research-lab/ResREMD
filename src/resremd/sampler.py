@@ -327,6 +327,9 @@ class _Run:
         self.res_h = self.ensemble.enthalpy(energies["potential_kjmol"],
                                             energies["volume_nm3"],
                                             energies["area_nm2"])
+        # Kept with the run: the reservoir check in `resremd summary` compares
+        # these with the top replica's own energies.
+        np.save(self.out / "reservoir_enthalpy_kjmol.npy", self.res_h)
 
     def _start_fresh(self) -> None:
         o = self.options
@@ -748,7 +751,7 @@ def _new_cost() -> dict[str, Any]:
 _RUN_FILES = frozenset({
     "run.log", "topology.pdb", "states.csv", "energies.csv", "volumes.csv",
     "areas.csv", "origins.csv", "reservoir_exchanges.csv", "trajectories",
-    "replicas", "checkpoint.tmp.npz"})
+    "replicas", "checkpoint.tmp.npz", "reservoir_enthalpy_kjmol.npy"})
 
 
 def _claim_output(out: Path) -> None:
