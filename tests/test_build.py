@@ -412,3 +412,102 @@ def test_a_build_started_before_the_transition_rule_resumes():
     assert _same_convergence(old, now)
     assert not _same_convergence({**old, "tv": 0.05}, now)
     assert not _same_convergence(None, now) and _same_convergence(None, None)
+
+
+def _alanine_prepared(tmp_path):
+    from openmm import app
+
+    from resremd.system import write_prepared
+
+    top, pos = testsystems.alanine_dipeptide()
+    system = app.ForceField("amber14-all.xml").createSystem(
+        top, nonbondedMethod=app.NoCutoff, constraints=app.HBonds)
+    write_prepared(tmp_path / "setup", system, top, pos)
+    return top, pos
+
+
+def _shuffled_pdb(path, top, pos, drop=None):
+    """A PDB file of the structure with every residue's atoms in reverse
+    order, as a file from another program might list them."""
+    import io
+
+    from openmm import app
+
+    buf = io.StringIO()
+    app.PDBFile.writeFile(top, pos * 10.0, buf)
+    lines = buf.getvalue().splitlines()
+    atoms = [ln for ln in lines if ln.startswith(("ATOM", "HETATM"))]
+    by_res: dict[str, list[str]] = {}
+    for ln in atoms:
+        by_res.setdefault(ln[17:27], []).append(ln)
+    out = []
+    for group in by_res.values():
+        for ln in reversed(group):
+            if drop is None or ln[12:16].strip() != drop:
+                out.append(ln)
+    path.write_text("\n".join(out) + "\nEND\n")
+
+
+def test_structures_in_another_atom_order_are_matched_by_name(tmp_path):
+    top, pos = _alanine_prepared(tmp_path)
+    rng = np.random.default_rng(1)
+    files = []
+    for k in range(3):
+        p = pos + rng.normal(0.0, 0.01, pos.shape)
+        _shuffled_pdb(tmp_path / f"pose{k}.pdb", top, p)
+        files.append((tmp_path / f"pose{k}.pdb", p))
+    meta = resremd.import_reservoir(
+        trajectories=[str(f) for f, _ in files],
+        prepared=str(tmp_path / "setup"), output=str(tmp_path / "r"),
+        kind="non_boltzmann")
+    res = Reservoir.open(tmp_path / "r")
+    assert meta["n_frames"] == 3
+    for k, (_, p) in enumerate(files):
+        # PDB keeps 0.001 nm; the atoms are back in the system's order.
+        assert np.abs(res.frame(k)[0] - p).max() < 1e-3
+    # It serves a run of the prepared system.
+    resremd.run(str(tmp_path / "setup"), output=str(tmp_path / "run"),
+                reservoir=str(tmp_path / "r"), temperatures_K=[300, 400],
+                production_steps=100, exchange_interval_steps=50,
+                platform="Reference", equilibration_ns=0.0, minimize=False)
+
+
+def test_structures_missing_atoms_are_refused_by_name(tmp_path):
+    top, pos = _alanine_prepared(tmp_path)
+    _shuffled_pdb(tmp_path / "pose.pdb", top, pos, drop="HA")
+    with pytest.raises(ReservoirError, match="lacks HA"):
+        resremd.import_reservoir(trajectories=[str(tmp_path / "pose.pdb")],
+                                 prepared=str(tmp_path / "setup"),
+                                 output=str(tmp_path / "r"),
+                                 kind="non_boltzmann")
+
+
+def test_imported_structures_can_be_minimised(tmp_path):
+    import openmm
+
+    from resremd.system import load_prepared
+
+    top, pos = _alanine_prepared(tmp_path)
+    rng = np.random.default_rng(2)
+    strained = pos + rng.normal(0.0, 0.02, pos.shape)
+    _shuffled_pdb(tmp_path / "pose.pdb", top, strained)
+    resremd.import_reservoir(trajectories=[str(tmp_path / "pose.pdb")],
+                             prepared=str(tmp_path / "setup"),
+                             output=str(tmp_path / "r"), kind="non_boltzmann",
+                             minimize_steps=200, platform="Reference")
+    prep = load_prepared(tmp_path / "setup")
+    ctx = openmm.Context(prep.system, openmm.VerletIntegrator(0.001),
+                         openmm.Platform.getPlatformByName("Reference"))
+
+    def energy(x):
+        ctx.setPositions(x)
+        return ctx.getState(getEnergy=True).getPotentialEnergy()._value
+
+    after = energy(Reservoir.open(tmp_path / "r").frame(0)[0])
+    assert after < energy(strained) - 100.0
+    with pytest.raises(InputError, match="non_boltzmann"):
+        resremd.import_reservoir(trajectories=[str(tmp_path / "pose.pdb")],
+                                 prepared=str(tmp_path / "setup"),
+                                 output=str(tmp_path / "r2"),
+                                 kind="boltzmann", temperature_K=400.0,
+                                 minimize_steps=200)

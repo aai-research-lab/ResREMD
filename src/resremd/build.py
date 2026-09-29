@@ -689,8 +689,93 @@ def _save_build_checkpoint(path: Path, context: Any, frames: int, seed: int,
     os.replace(tmp, path)
 
 
+def _minimiser(prep: Prepared, o: dict[str, Any]):
+    """Minimise one frame with the prepared System."""
+    import openmm
+
+    ctx, _ = create_context(prep.system, openmm.VerletIntegrator(0.001),
+                            platform=o["platform"], precision="mixed",
+                            device=None, cpu_threads=None)
+
+    def minimise(pos: np.ndarray, box: np.ndarray | None) -> np.ndarray:
+        if box is not None:
+            ctx.setPeriodicBoxVectors(*(openmm.Vec3(*map(float, r))
+                                        for r in box))
+        ctx.setPositions(pos)
+        openmm.LocalEnergyMinimizer.minimize(ctx, 10.0, o["minimize_steps"])
+        state = ctx.getState(getPositions=True)
+        return np.asarray(state.getPositions(asNumpy=True)._value)
+
+    return minimise
+
+
+#: File types that carry their own atoms. Their frames are matched to the
+#: reference topology by name; other formats are read in its order.
+_WITH_ATOMS = (".pdb", ".ent", ".cif", ".pdbx", ".mmcif", ".gro", ".mol2",
+               ".h5")
+
+
+def _atom_order(file_top: Any, ref_top: Any, source: str) -> np.ndarray | None:
+    """Indices that put a file's atoms in the reference order, matched by
+    residue order and atom name; None when they already are."""
+    ref_res = list(ref_top.residues)
+    file_res = list(file_top.residues)
+    if len(ref_res) != len(file_res):
+        raise ReservoirError(
+            f"{source} has {len(file_res)} residues and the system "
+            f"{len(ref_res)}.", code="resremd.reservoir.mismatch")
+    order = []
+    for k, (rr, fr) in enumerate(zip(ref_res, file_res)):
+        if rr.name != fr.name:
+            raise ReservoirError(
+                f"{source}: residue {k + 1} is {fr.name}, the system's is "
+                f"{rr.name}.", code="resremd.reservoir.mismatch")
+        names = {}
+        for a in fr.atoms:
+            if a.name in names:
+                raise ReservoirError(
+                    f"{source}: residue {k + 1} ({fr.name}) has two atoms "
+                    f"named {a.name}.", code="resremd.reservoir.mismatch")
+            names[a.name] = a.index
+        want = [a.name for a in rr.atoms]
+        missing = [n for n in want if n not in names]
+        extra = sorted(set(names) - set(want))
+        if missing or extra:
+            text = f"{source}: residue {k + 1} ({fr.name})"
+            if missing:
+                text += f" lacks {', '.join(missing[:5])}"
+            if extra:
+                text += (";" if missing else "") + \
+                    f" has {', '.join(extra[:5])}, which the system does not"
+            raise ReservoirError(
+                text + ". Prepare the structures with the same force field "
+                "and hydrogen names as the system.",
+                code="resremd.reservoir.mismatch")
+        order += [names[n] for n in want]
+    order = np.asarray(order)
+    return None if np.array_equal(order, np.arange(order.size)) else order
+
+
+def _read_frames(md, files: list[str], ref_top: Any, chunk: int = 1000):
+    """Chunks of (file, xyz, unit cell vectors or None), in the reference
+    atom order."""
+    for f in files:
+        if Path(f).suffix.lower() in _WITH_ATOMS:
+            t = md.load(f)
+            order = _atom_order(t.topology, ref_top, f)
+            xyz = t.xyz if order is None else t.xyz[:, order]
+            yield f, xyz, t.unitcell_vectors
+            continue
+        for part in md.iterload(f, top=ref_top, chunk=chunk):
+            if part.n_atoms != ref_top.n_atoms:
+                raise ReservoirError(
+                    f"{f} has {part.n_atoms} atoms and the topology "
+                    f"{ref_top.n_atoms}.", code="resremd.reservoir.mismatch")
+            yield f, part.xyz, part.unitcell_vectors
+
+
 def import_trajectories(**settings: Any) -> dict[str, Any]:
-    """Build a reservoir from existing trajectories.
+    """Build a reservoir from existing trajectories or structures.
 
     Settings are those of :data:`resremd.options.IMPORT`. Needs MDTraj.
     """
@@ -712,8 +797,30 @@ def import_trajectories(**settings: Any) -> dict[str, Any]:
     if kind == "non_boltzmann" and o["pressure_bar"] is not None:
         raise InputError("A non-Boltzmann reservoir is for constant volume "
                          "only.", code="resremd.input.ensemble")
-    omm_topology = app.PDBFile(o["topology"]).topology
-    md_topology = md.load_topology(o["topology"])
+    if o["minimize_steps"] and kind != "non_boltzmann":
+        raise InputError(
+            "Minimised frames are no longer a Boltzmann sample; "
+            "`minimize_steps` is for a non_boltzmann reservoir only.",
+            code="resremd.input.minimize")
+    prep = load_prepared(o["prepared"]) if o["prepared"] else None
+    if o["minimize_steps"] and prep is None:
+        raise InputError("`minimize_steps` needs `prepared`, whose System "
+                         "minimises the frames.", code="resremd.input.missing")
+    if prep is None and not o["topology"]:
+        raise InputError("Give `topology` or `prepared`: the atoms the "
+                         "reservoir is for.", code="resremd.input.missing")
+    omm_topology = prep.topology if prep is not None \
+        else app.PDBFile(o["topology"]).topology
+    ref_top = md.Topology.from_openmm(omm_topology)
+    if prep is not None and o["topology"]:
+        # Frames in files without atoms are read in this topology's order,
+        # which must be the prepared system's.
+        read_top = md.load_topology(o["topology"])
+        if _atom_order(read_top, ref_top, o["topology"]) is not None:
+            raise ReservoirError(
+                f"{o['topology']} lists the system's atoms in another order. "
+                "Give files that carry their own atoms, or a topology in the "
+                "prepared system's order.", code="resremd.reservoir.mismatch")
     n_atoms = omm_topology.getNumAtoms()
     files = [str(f) for f in o["trajectories"]]
     for f in files:
@@ -722,7 +829,9 @@ def import_trajectories(**settings: Any) -> dict[str, Any]:
                              code="resremd.input.missing")
     lossy = [f for f in files if Path(f).suffix.lower() in (".xtc", ".gro",
                                                             ".pdb")]
-    if lossy:
+    if lossy and kind != "non_boltzmann":
+        # A non-Boltzmann reservoir does not mind: its exchanges use only
+        # the energies of the coordinates as stored.
         logger.warning(
             "%s store coordinates rounded to 0.001 nm or coarser. Rounding "
             "stretches every bond a little, which raises the energy by "
@@ -733,21 +842,31 @@ def import_trajectories(**settings: Any) -> dict[str, Any]:
     boxes: list[np.ndarray] = []
     total = 0
     periodic = None
-    for f in files:
-        for chunk in md.iterload(f, top=md_topology, chunk=1000):
-            if chunk.n_atoms != n_atoms:
-                raise ReservoirError(
-                    f"{f} has {chunk.n_atoms} atoms and the topology "
-                    f"{n_atoms}.", code="resremd.reservoir.mismatch")
-            has_box = chunk.unitcell_vectors is not None
-            if periodic is None:
-                periodic = has_box
-            elif periodic != has_box:
-                raise ReservoirError("Some trajectories have boxes and some "
-                                     "do not.", code="resremd.reservoir.box")
-            if has_box:
-                boxes.append(np.asarray(chunk.unitcell_vectors, dtype=float))
-            total += chunk.n_frames
+    for f, xyz, cell in _read_frames(md, files, ref_top):
+        has_box = cell is not None
+        if periodic is None:
+            periodic = has_box
+        elif periodic != has_box:
+            raise ReservoirError("Some trajectories have boxes and some "
+                                 "do not.", code="resremd.reservoir.box")
+        if has_box:
+            boxes.append(np.asarray(cell, dtype=float))
+        total += len(xyz)
+    shared_box = None
+    if prep is not None and bool(periodic) != prep.periodic:
+        if prep.periodic and prep.box is not None and \
+                o["pressure_bar"] is None:
+            # Structures without a box, for a periodic system at constant
+            # volume: each takes the system's box.
+            periodic = True
+            shared_box = np.asarray(prep.box, dtype=float)
+            boxes = [np.repeat(shared_box[None], total, axis=0)]
+            logger.info("The frames carry no box; each is given the "
+                        "prepared system's.")
+        else:
+            raise ReservoirError(
+                "The frames and the prepared system disagree about periodic "
+                "boundaries.", code="resremd.reservoir.box")
     keep = np.arange(0, total, o["stride"])
     weights = None
     if o["weights"]:
@@ -799,7 +918,10 @@ def import_trajectories(**settings: Any) -> dict[str, Any]:
         periodic=bool(periodic), topology_sha256=topology_digest(omm_topology),
         source={"method": "imported from trajectories",
                 "trajectories": [str(Path(f).resolve()) for f in files],
-                "topology": str(Path(o["topology"]).resolve()),
+                "topology": str(Path(o["topology"]).resolve())
+                if o["topology"] else None,
+                "prepared": prep.source if prep is not None else None,
+                "minimize_steps": o["minimize_steps"],
                 "stride": o["stride"],
                 "weights": str(Path(o["weights"]).resolve())
                 if o["weights"] else None,
@@ -808,17 +930,24 @@ def import_trajectories(**settings: Any) -> dict[str, Any]:
     writer = ReservoirWriter(out, n_frames=n_frames, n_atoms=n_atoms,
                              periodic=bool(periodic))
     wanted = set(keep.tolist())
+    minimise = _minimiser(prep, o) if o["minimize_steps"] else None
     index = 0
     written = 0
-    for f in files:
-        for chunk in md.iterload(f, top=md_topology, chunk=1000):
-            for i in range(chunk.n_frames):
-                if index in wanted:
-                    b = (np.asarray(chunk.unitcell_vectors[i], dtype=float)
-                         if periodic else None)
-                    writer.write(written, chunk.xyz[i], b)
-                    written += 1
-                index += 1
+    for f, xyz, cell in _read_frames(md, files, ref_top):
+        for i in range(len(xyz)):
+            if index in wanted:
+                if not periodic:
+                    b = None
+                elif cell is not None:
+                    b = np.asarray(cell[i], dtype=float)
+                else:
+                    b = shared_box
+                pos = np.asarray(xyz[i], dtype=float)
+                if minimise is not None:
+                    pos = minimise(pos, b)
+                writer.write(written, pos, b)
+                written += 1
+            index += 1
     writer.flush()
     if weights is not None:
         np.save(out / "weights.npy", weights)

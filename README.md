@@ -189,7 +189,22 @@ upper bound, and not as proof that the reservoir is converged.
   or `pressure_bar` runs at constant pressure.
 - **Imported frames.** XTC, GRO and PDB files round coordinates to 0.001 nm,
   which stretches bonds enough to take frames out of the Boltzmann
-  distribution. Import from DCD, TRR or NetCDF.
+  distribution. Import a Boltzmann or weighted reservoir from DCD, TRR or
+  NetCDF.
+- **Reservoirs of any structures.** A non-Boltzmann reservoir can hold
+  structures from anywhere: docking poses, predicted models, a
+  coarse-grained search. Its exchanges use only the energies of the
+  coordinates as stored, so rounding does no harm, and it serves any
+  Hamiltonian of the same atoms. Give the prepared system, and structures
+  in PDB, mmCIF, GRO or MOL2 are matched to it atom by atom by residue
+  order and name, whatever order they list atoms in:
+  ```
+  resremd reservoir import --kind non_boltzmann --prepared setup \
+      --trajectories poses/*.pdb --minimize-steps 500 --output poses_reservoir
+  ```
+  `--minimize-steps` relaxes clashes with the run's force field first.
+  Structures of a solvated system need the same solvent atoms; in practice
+  this is for implicit solvent or vacuum.
 
 ## Output
 

@@ -389,8 +389,28 @@ TRAJECTORIES = Option(
 TOPOLOGY = Option(
     "topology", str, None,
     "PDB file with the same atoms, in the same order, as the system the "
-    "reservoir will be used with.",
-    group="Input", required=True, example="topology.pdb")
+    "reservoir will be used with. Needed for trajectory formats that carry "
+    "no atoms (DCD, XTC, TRR, NetCDF) unless `prepared` is given.",
+    group="Input", example="topology.pdb")
+
+IMPORT_PREPARED = Option(
+    "prepared", str, None,
+    "The prepared system the reservoir is for. Its topology is then the "
+    "reference: frames from files that carry their own atoms (PDB, mmCIF, "
+    "GRO, MOL2, HDF5), for example docking poses or predicted models, are "
+    "matched to it atom by atom by residue order and atom name, whatever "
+    "order the file lists them in, and refused with the first atom that "
+    "does not match. Needed for `minimize_steps`.",
+    group="Input", example="setup/")
+
+MINIMIZE_STEPS = Option(
+    "minimize_steps", int, 0,
+    "Energy-minimise every frame for at most this many steps with the "
+    "prepared System before it is stored, to relax clashes in structures "
+    "that did not come from this force field. Only for a `non_boltzmann` "
+    "reservoir: a minimised set is no Boltzmann sample, but a non-Boltzmann "
+    "reservoir needs none.",
+    group="Reservoir", minimum=0)
 
 KIND = Option(
     "kind", str, "boltzmann",
@@ -457,9 +477,10 @@ GENERATE = Schema(
 
 IMPORT = Schema(
     name="reservoir import",
-    description="Build a reservoir from trajectories that already exist.",
+    description="Build a reservoir from trajectories or structures that "
+                "already exist.",
     options=(
-        TRAJECTORIES, TOPOLOGY, OUTPUT_RESERVOIR,
+        TRAJECTORIES, TOPOLOGY, IMPORT_PREPARED, OUTPUT_RESERVOIR,
         replace(RESERVOIR_TEMPERATURE, required=False,
                 help=RESERVOIR_TEMPERATURE.help
                 + " Required unless the kind is `non_boltzmann`."),
@@ -468,7 +489,8 @@ IMPORT = Schema(
                 help="Pressure the frames were sampled at, in bar. Required "
                      "when their boxes differ, and absent when they were "
                      "sampled at constant volume."),
-        SURFACE_TENSION,
+        SURFACE_TENSION, MINIMIZE_STEPS,
+        replace(PLATFORM, help="OpenMM platform for `minimize_steps`."),
     ),
 )
 
