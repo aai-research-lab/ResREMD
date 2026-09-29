@@ -878,6 +878,13 @@ def import_trajectories(**settings: Any) -> dict[str, Any]:
             boxes.append(np.asarray(cell, dtype=float))
         total += len(xyz)
     shared_box = None
+    if prep is not None and periodic and not prep.periodic:
+        # Structures with a box (a CRYST1 record) for a system without one:
+        # the box means nothing to it.
+        periodic = False
+        boxes = []
+        logger.info("The frames carry boxes; the prepared system has none, "
+                    "so they are dropped.")
     if prep is not None and bool(periodic) != prep.periodic:
         if prep.periodic and prep.box is not None and \
                 o["pressure_bar"] is None:
@@ -963,7 +970,7 @@ def import_trajectories(**settings: Any) -> dict[str, Any]:
             if index in wanted:
                 if not periodic:
                     b = None
-                elif cell is not None:
+                elif shared_box is None and cell is not None:
                     b = np.asarray(cell[i], dtype=float)
                 else:
                     b = shared_box

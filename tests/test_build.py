@@ -511,3 +511,17 @@ def test_imported_structures_can_be_minimised(tmp_path):
                                  output=str(tmp_path / "r2"),
                                  kind="boltzmann", temperature_K=400.0,
                                  minimize_steps=200)
+
+
+def test_structures_with_a_box_suit_a_system_without_one(tmp_path):
+    top, pos = _alanine_prepared(tmp_path)
+    _shuffled_pdb(tmp_path / "pose.pdb", top, pos)
+    text = (tmp_path / "pose.pdb").read_text()
+    (tmp_path / "pose.pdb").write_text(
+        "CRYST1   30.000   30.000   30.000  90.00  90.00  90.00 P 1"
+        "           1\n" + text)
+    meta = resremd.import_reservoir(trajectories=[str(tmp_path / "pose.pdb")],
+                                    prepared=str(tmp_path / "setup"),
+                                    output=str(tmp_path / "r"),
+                                    kind="non_boltzmann")
+    assert not meta["periodic"]

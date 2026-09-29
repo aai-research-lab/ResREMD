@@ -54,7 +54,7 @@ from .errors import InputError, ResumeError
 from .ladder import resolve as resolve_ladder
 from .options import RUN, resolve as resolve_options
 from .output import CsvLog, DcdTrajectory, write_pdb
-from .reservoir import HAMILTONIAN_WARN_KT, Reservoir, write_json
+from .reservoir import Reservoir, write_json
 from .stopping import StopRequests
 from .system import (Prepared, from_objects, load_prepared, select_atoms,
                      subset_topology, system_digest, topology_digest)
@@ -211,6 +211,7 @@ class _Run:
     # -- setting up ---------------------------------------------------------
     def _prepare(self) -> None:
         o = self.options
+        self.warnings: list[str] = []
         system = self.prepared.system
         # The digest is of the System as given, before any barostat is added
         # here, so the same inputs give the same cache key and fingerprint.
@@ -239,6 +240,17 @@ class _Run:
             logger.info("REST2: %d solute atoms at %g K, scales %s",
                         solute.size, self.T0,
                         ", ".join(f"{x:.3f}" for x in self.scales))
+        if self.rest2 is not None and self.reservoir is not None and \
+                not self.reservoir.rest2 and \
+                solute.size < self.prepared.n_atoms and \
+                self.reservoir.kind != "non_boltzmann":
+            self.warnings.append(
+                "The reservoir was sampled without REST2 scaling, so its "
+                "exchanges with the REST2 top state weigh the whole "
+                "system's energy, solvent included; with many solvent "
+                "atoms almost none will be accepted. A reservoir generated "
+                "with REST2 scaling (`rest2_run_temperature_K`) exchanges "
+                "through the solute alone.")
         if self.reservoir is not None and self.reservoir.rest2:
             if self.rest2 is None:
                 raise InputError(
@@ -256,7 +268,6 @@ class _Run:
             frequency=o["barostat_frequency"])
         self.system = system
         self.ensemble = ensemble
-        self.warnings: list[str] = []
         if self.reservoir is not None:
             self.warnings += self.reservoir.check_against(
                 topology_sha256=self.topology_sha256,
@@ -379,8 +390,8 @@ class _Run:
                         if self.engine.platform in ("CUDA", "HIP", "OpenCL")
                         else None,
                         "openmm": openmm.__version__,
-                        "rest2": None if not rest2
-                        else self.rest2["solute_sha256"]},
+                        **({"rest2": self.rest2["solute_sha256"]}
+                           if rest2 else {})},
             progress=logger.info, terms=rest2)
         pot = energies["potential_kjmol"]
         if rest2:
@@ -391,8 +402,13 @@ class _Run:
         found = []
         # Reweight only when the Hamiltonians differ beyond precision noise;
         # otherwise the weights would only carry that noise.
+        # A reservoir without build energies cannot be reweighted, and
+        # reweight_to says so rather than letting the option do nothing.
         if self.options["reservoir_reweight"] and \
-                self.reservoir.hamiltonian_spread(pot) > HAMILTONIAN_WARN_KT:
+                self.reservoir.kind != "non_boltzmann" and (
+                    not self.reservoir.has_build_energies()
+                    or self.reservoir.hamiltonian_spread(pot)
+                    > self.reservoir.warn_kt()):
             found += self.reservoir.reweight_to(pot)
             logger.info("Reservoir reweighted to this Hamiltonian: %.0f "
                         "effective frames of %d.", self.reservoir.reweighted,
@@ -500,8 +516,11 @@ class _Run:
 
     def _check_resumable(self, meta: dict[str, Any]) -> None:
         before = meta["fingerprint"]
+        # Settings added since a run was started read as their defaults.
+        added = {"rest2": False, "reservoir_reweight": False,
+                 "rest2_solute": None}
         differ = [k for k in self.fingerprint
-                  if json.dumps(before.get(k), sort_keys=True)
+                  if json.dumps(before.get(k, added.get(k)), sort_keys=True)
                   != json.dumps(self.fingerprint[k], sort_keys=True)]
         if differ:
             raise ResumeError(

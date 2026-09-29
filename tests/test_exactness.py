@@ -123,3 +123,16 @@ def test_a_reservoir_reweighted_to_this_hamiltonian_is_exact(tmp_path):
     # The run's summary checks the reservoir with the weights it drew by.
     check = resremd.summarize(tmp_path / "run")["reservoir_check"]
     assert abs(check["z"]) < 4
+
+
+def test_reweighting_needs_the_energies_recorded_at_build(tmp_path):
+    from resremd.errors import ReservoirError
+
+    testsystems.write_double_well_reservoir(
+        tmp_path / "r", kind="boltzmann", n_frames=100, temperature_K=520.0)
+    with pytest.raises(ReservoirError, match="imported"):
+        resremd.run(testsystems.double_well(), output=str(tmp_path / "run"),
+                    reservoir=str(tmp_path / "r"), temperatures_K=TEMPERATURES,
+                    production_steps=250 * 10, exchange_interval_steps=250,
+                    platform="Reference", equilibration_ns=0.0,
+                    minimize=False, reservoir_reweight=True)

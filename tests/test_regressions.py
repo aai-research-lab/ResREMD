@@ -157,3 +157,26 @@ def test_leftovers_of_a_run_that_never_checkpointed_are_cleared(tmp_path):
 def test_mixed_save_states_on_the_command_line(tmp_path):
     assert main(["-q", "run", "--output", str(tmp_path / "x"),
                  "--save-states", "lowest", "1"]) == 2
+
+
+def test_a_run_from_before_new_settings_can_be_extended(tmp_path):
+    """A checkpoint whose fingerprint predates `rest2` and
+    `reservoir_reweight` resumes: missing keys read as their defaults."""
+    import json
+
+    common = dict(temperatures_K=[300, 400], exchange_interval_steps=50,
+                  platform="Reference", equilibration_ns=0.0,
+                  save_selection="all", minimize=False)
+    resremd.run(testsystems.double_well(), output=str(tmp_path / "run"),
+                production_steps=100, **common)
+    chk = tmp_path / "run/checkpoint.npz"
+    with np.load(chk) as data:
+        arrays = {k: np.array(data[k]) for k in data.files}
+    meta = json.loads(str(arrays["meta"]))
+    for key in ("rest2", "reservoir_reweight", "rest2_solute"):
+        meta["fingerprint"].pop(key, None)
+    arrays["meta"] = np.array(json.dumps(meta))
+    np.savez(chk, **arrays)
+    m = resremd.run(testsystems.double_well(), output=str(tmp_path / "run"),
+                    production_steps=200, resume=True, **common)
+    assert m["status"] == "complete" and m["progress"]["cycles_done"] == 4

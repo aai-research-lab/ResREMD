@@ -16,6 +16,12 @@ through OpenMM parameter offsets on global parameters; 1-4 pairs within the
 solute by s^2, and those reaching outside it by s. Bonds and angles are not
 scaled.
 
+OpenMM does not apply parameter offsets to the long-range dispersion
+correction, so with it on the correction stays unscaled at every state. It
+is the same function of the volume at every state, so sampling and MBAR are
+exact for the Hamiltonian used; at constant pressure the scaled states feel
+the unscaled correction, a small departure from Wang et al.'s Hamiltonian.
+
 The potential energy of any configuration is then exactly quadratic in s,
 
     U(s) = A s^2 + B s + C,
