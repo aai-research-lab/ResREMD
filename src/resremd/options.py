@@ -137,6 +137,18 @@ RESERVOIR_INTERVAL = Option(
     "this many exchange cycles.",
     group="Reservoir", minimum=1)
 
+RESERVOIR_REWEIGHT = Option(
+    "reservoir_reweight", bool, False,
+    "Use a reservoir generated under another Hamiltonian (another force "
+    "field, solvent model or mutation-free change of parameters, with the "
+    "same atoms) by reweighting its frames to this one: each frame's weight "
+    "is multiplied by exp(-[U_run - U_built] / kT_R), from its energy under "
+    "this run's System and the one recorded when it was built. The run "
+    "reports the effective number of frames left and refuses when too few "
+    "remain. A non-Boltzmann reservoir needs no reweighting: its exchanges "
+    "use only this run's energies, so it serves any Hamiltonian as it is.",
+    group="Reservoir")
+
 EXCHANGE_INTERVAL = Option(
     "exchange_interval_steps", int, 500,
     "MD steps between exchange attempts. 500 steps at 2 fs is 1 ps, as in "
@@ -416,7 +428,7 @@ RUN = Schema(
     options=(
         PREPARED, OUTPUT_RUN, RESUME,
         TEMPERATURES, TEMPERATURE_MIN, TEMPERATURE_MAX, N_REPLICAS,
-        RESERVOIR, RESERVOIR_INTERVAL,
+        RESERVOIR, RESERVOIR_INTERVAL, RESERVOIR_REWEIGHT,
         EXCHANGE_INTERVAL,
         DURATION, PRODUCTION_STEPS, EQUILIBRATION, MINIMIZE,
         INTEGRATOR, TIMESTEP, FRICTION, ENSEMBLE, PRESSURE,

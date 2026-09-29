@@ -65,3 +65,61 @@ def test_non_boltzmann_reservoir_resident_contexts(tmp_path):
 def test_long(tmp_path, kind):
     run = run_double_well(tmp_path, kind, 200000)
     check_against_exact(run)
+
+
+def _tilted_reservoir(path, tilt, n_frames=20000, temperature_K=520.0):
+    """An exact Boltzmann reservoir of a double well with another tilt, with
+    the energies a build would have recorded under that Hamiltonian."""
+    from resremd.reservoir import write_reservoir
+
+    rng = np.random.default_rng(21)
+    x = testsystems.grid()
+    u = testsystems.BARRIER * (x * x - 1.0) ** 2 + tilt * x
+    p = np.exp(-(u - u.min()) / (BOLTZ * temperature_K))
+    cdf = np.cumsum(p) / p.sum()
+    xs = np.interp(rng.random(n_frames), cdf, x)
+    frames = testsystems.double_well_frames(xs, temperature_K, rng)
+    write_reservoir(path, topology=testsystems.double_well().topology,
+                    positions=frames, kind="boltzmann",
+                    temperature_K=temperature_K)
+    fx, fy, fz = frames[:, 0, 0], frames[:, 0, 1], frames[:, 0, 2]
+    built = (testsystems.BARRIER * (fx * fx - 1.0) ** 2 + tilt * fx
+             + 0.5 * testsystems.SPRING * (fy ** 2 + fz ** 2))
+    np.save(path / "build_potential_kjmol.npy", built)
+
+
+def test_a_reservoir_from_another_hamiltonian_is_refused(tmp_path):
+    from resremd.errors import ReservoirError
+
+    _tilted_reservoir(tmp_path / "r", testsystems.TILT + 4.0)
+    # Recorded energies unlike this System's by 2 kT from frame to frame.
+    built = np.load(tmp_path / "r/build_potential_kjmol.npy")
+    rng = np.random.default_rng(3)
+    np.save(tmp_path / "r/build_potential_kjmol.npy",
+            built + rng.normal(0.0, 2 * BOLTZ * 520.0, built.size))
+    with pytest.raises(ReservoirError, match="reservoir_reweight"):
+        resremd.run(testsystems.double_well(), output=str(tmp_path / "run"),
+                    reservoir=str(tmp_path / "r"), temperatures_K=TEMPERATURES,
+                    production_steps=250 * 10, exchange_interval_steps=250,
+                    platform="Reference", equilibration_ns=0.0,
+                    minimize=False)
+
+
+def test_a_reservoir_reweighted_to_this_hamiltonian_is_exact(tmp_path):
+    _tilted_reservoir(tmp_path / "r", testsystems.TILT + 4.0)
+    resremd.run(testsystems.double_well(), output=str(tmp_path / "run"),
+                reservoir=str(tmp_path / "r"), temperatures_K=TEMPERATURES,
+                production_steps=250 * 30000, exchange_interval_steps=250,
+                trajectory_interval_steps=250, friction_per_ps=5.0,
+                platform="Reference", random_seed=7, save_selection="all",
+                equilibration_ns=0.0, minimize=False, reservoir_reweight=True)
+    check_against_exact(tmp_path / "run")
+    import json
+
+    man = json.loads((tmp_path / "run/manifest.json").read_text())
+    kish = man["reservoir"]["reweighted_effective_frames"]
+    assert 2000 < kish < 20000
+    assert (tmp_path / "run/reservoir_weights.npy").exists()
+    # The run's summary checks the reservoir with the weights it drew by.
+    check = resremd.summarize(tmp_path / "run")["reservoir_check"]
+    assert abs(check["z"]) < 4

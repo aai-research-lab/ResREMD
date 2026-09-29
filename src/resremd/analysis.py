@@ -275,6 +275,13 @@ def _reservoir_enthalpy(run_dir: Path, manifest: dict[str, Any]
     return None
 
 
+def _run_weights(run_dir: Path, reservoir) -> np.ndarray | None:
+    """The weights the run drew frames by: its own, when it reweighted the
+    reservoir to its Hamiltonian, else the reservoir's."""
+    own = Path(run_dir) / "reservoir_weights.npy"
+    return np.load(own) if own.exists() else reservoir.weights
+
+
 def reservoir_check(run_dir: str | Path) -> dict[str, Any] | None:
     """:func:`ensemble_check` between a run's top replica and its reservoir."""
     from .reservoir import Reservoir
@@ -301,7 +308,7 @@ def reservoir_check(run_dir: str | Path) -> dict[str, Any] | None:
     reservoir = Reservoir.open(manifest["reservoir"]["path"])
     t_top = manifest["states"][top]["temperature_K"]
     return ensemble_check(top_h, res_h, beta(t_top), reservoir.beta,
-                          reservoir_weights=reservoir.weights)
+                          reservoir_weights=_run_weights(run_dir, reservoir))
 
 
 def reservoir_coverage(run_dir: str | Path, top_labels, reservoir_labels,
@@ -330,7 +337,7 @@ def reservoir_coverage(run_dir: str | Path, top_labels, reservoir_labels,
     t_top = manifest["states"][-1]["temperature_K"]
     return coverage_check(top_labels, reservoir_labels, res_h, beta(t_top),
                           reservoir.beta, n_states,
-                          reservoir_weights=reservoir.weights,
+                          reservoir_weights=_run_weights(run_dir, reservoir),
                           min_visits=min_visits)
 
 

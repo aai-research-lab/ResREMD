@@ -37,7 +37,7 @@ from .errors import InputError, ResumeError
 from .ladder import resolve as resolve_ladder
 from .options import RUN, resolve as resolve_options
 from .output import CsvLog, DcdTrajectory, write_pdb
-from .reservoir import Reservoir, write_json
+from .reservoir import HAMILTONIAN_WARN_KT, Reservoir, write_json
 from .stopping import StopRequests
 from .system import (Prepared, from_objects, load_prepared, select_atoms,
                      subset_topology, system_digest, topology_digest)
@@ -67,7 +67,8 @@ CITATIONS = [
 
 #: Settings that decide what is sampled. A resumed run must match them.
 _SCIENTIFIC = ("temperatures_K", "exchange_interval_steps",
-               "reservoir_interval", "integrator", "timestep_fs",
+               "reservoir_interval", "reservoir_reweight", "integrator",
+               "timestep_fs",
                "friction_per_ps", "trajectory_interval_steps", "save_states",
                "save_atoms", "save_replica_trajectories")
 
@@ -324,8 +325,22 @@ class _Run:
                         else None,
                         "openmm": openmm.__version__},
             progress=logger.info)
-        for w in self.reservoir.check_hamiltonian(energies["potential_kjmol"],
-                                                  self.system_sha256):
+        pot = energies["potential_kjmol"]
+        found = []
+        # Reweight only when the Hamiltonians differ beyond precision noise;
+        # otherwise the weights would only carry that noise.
+        if self.options["reservoir_reweight"] and \
+                self.reservoir.hamiltonian_spread(pot) > HAMILTONIAN_WARN_KT:
+            found += self.reservoir.reweight_to(pot)
+            logger.info("Reservoir reweighted to this Hamiltonian: %.0f "
+                        "effective frames of %d.", self.reservoir.reweighted,
+                        self.reservoir.n_frames)
+            np.save(self.out / "reservoir_weights.npy",
+                    self.reservoir.weights)
+        found += self.reservoir.check_hamiltonian(
+            pot, self.system_sha256,
+            reweighted=self.reservoir.reweighted is not None)
+        for w in found:
             logger.warning(w)
             self.warnings.append(w)
         self.res_h = self.ensemble.enthalpy(energies["potential_kjmol"],
@@ -585,6 +600,7 @@ class _Run:
                 "n_frames": self.reservoir.n_frames,
                 "frames_sha256": self.reservoir.content_digest(),
                 "interval_cycles": o["reservoir_interval"],
+                "reweighted_effective_frames": self.reservoir.reweighted,
             },
             "progress": {
                 "cycles_done": self.cycle,
@@ -769,7 +785,8 @@ def _new_cost() -> dict[str, Any]:
 _RUN_FILES = frozenset({
     "run.log", "topology.pdb", "states.csv", "energies.csv", "volumes.csv",
     "areas.csv", "origins.csv", "reservoir_exchanges.csv", "trajectories",
-    "replicas", "checkpoint.tmp.npz", "reservoir_enthalpy_kjmol.npy"})
+    "replicas", "checkpoint.tmp.npz", "reservoir_enthalpy_kjmol.npy",
+    "reservoir_weights.npy"})
 
 
 def _claim_output(out: Path) -> None:

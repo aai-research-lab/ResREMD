@@ -121,8 +121,13 @@ upper bound, and not as proof that the reservoir is converged.
   same kind of barostat.
 - For a reservoir generated here, its frames' energies are recomputed under
   the run's System and compared with those recorded when it was built. A
-  spread of more than 0.5 kT means another Hamiltonian (force field, cutoff,
-  solvent model) and the run is refused; above 0.05 kT it is warned about.
+  spread of more than 0.1 kT means another Hamiltonian (force field, cutoff,
+  solvent model) and the run is refused; above 0.03 kT it is warned about.
+  With `reservoir_reweight` the frames are reweighted to the run's
+  Hamiltonian instead, and the run reports how many effective frames are
+  left. A non-Boltzmann reservoir needs neither: its exchanges use only the
+  run's own energies, so one reservoir serves any Hamiltonian of the same
+  atoms, as Kasavajhala and Simmerling showed (JCTC 2023).
 - At constant volume every reservoir frame has the run's box.
 - Reservoir energies are computed with the run's own System, platform and
   precision, from exactly the coordinates that will be injected: constraints
