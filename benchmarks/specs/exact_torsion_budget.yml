@@ -1,0 +1,49 @@
+# Tier 1b, budget. How much of a fixed budget should the reservoir take?
+# The bias-weighted reservoir of exact_torsion (k = 70) at 1, 3, 10 and 20
+# ns. At equal total cost, a shorter reservoir leaves more for replica
+# exchange; too short a one is biased.
+name: exact_torsion_budget
+system: {name: torsion_model}
+temperatures_K: [300.0, 360.0, 432.0]
+seeds: [1, 2, 3, 4, 5]
+run:
+  production_steps: 5000000        # 10 ns per replica, for the longest
+  exchange_interval_steps: 250
+  trajectory_interval_steps: 250
+  friction_per_ps: 5.0
+  equilibration_ns: 0.0
+  minimize: false
+  save_selection: all
+  platform: Reference
+methods:
+  - name: res_1ns
+    reservoir:
+      generate: {temperature_K: 520.0, duration_ns: 1.0,
+                 frame_interval_steps: 500, equilibration_ns: 0.1,
+                 friction_per_ps: 5.0, platform: Reference,
+                 bias_torsions: [{atoms: phi, energy: "-k*sin(theta)^2",
+                                  parameters: {k: 70.0}}]}
+  - name: res_3ns
+    reservoir:
+      generate: {temperature_K: 520.0, duration_ns: 3.0,
+                 frame_interval_steps: 500, equilibration_ns: 0.1,
+                 friction_per_ps: 5.0, platform: Reference,
+                 bias_torsions: [{atoms: phi, energy: "-k*sin(theta)^2",
+                                  parameters: {k: 70.0}}]}
+  - name: res_10ns
+    reservoir:
+      generate: {temperature_K: 520.0, duration_ns: 10.0,
+                 frame_interval_steps: 500, equilibration_ns: 0.1,
+                 friction_per_ps: 5.0, platform: Reference,
+                 bias_torsions: [{atoms: phi, energy: "-k*sin(theta)^2",
+                                  parameters: {k: 70.0}}]}
+  - name: res_20ns
+    reservoir:
+      generate: {temperature_K: 520.0, duration_ns: 20.0,
+                 frame_interval_steps: 500, equilibration_ns: 0.1,
+                 friction_per_ps: 5.0, platform: Reference,
+                 bias_torsions: [{atoms: phi, energy: "-k*sin(theta)^2",
+                                  parameters: {k: 70.0}}]}
+reference: {kind: exact}
+analysis: {threshold_tv: 0.02, threshold_jsd: 0.01, points: 40, mbar: true}
+slurm: {gres: null, cpus_per_task: 1}

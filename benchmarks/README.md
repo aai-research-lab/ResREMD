@@ -138,6 +138,7 @@ the coverage check expose it.
 | `smoke.yml` | does the harness work (CI runs it) | CPU, 15 s |
 | `exact_defects.yml` | tier 1: seven reservoirs, each flawed in one way, against plain REMD | CPU, about an hour |
 | `exact_torsion.yml` | tier 1b: plain against bias-weighted reservoirs across a barrier | CPU, about an hour |
+| `exact_torsion_budget.yml` | tier 1b: how much of a fixed budget the reservoir should take | CPU, about an hour |
 | `proline_implicit_reference.yml` | reweighted reservoirs at 300 K for tier 2b's reference | one GPU, a day |
 | `proline_implicit.yml` | tier 2b: plain against bias-weighted reservoirs | one GPU, a day |
 | `proline_explicit_reference.yml`, `proline_explicit.yml` | tier 2b in water | GPU-days |

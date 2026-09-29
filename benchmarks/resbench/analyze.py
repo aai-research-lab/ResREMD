@@ -367,8 +367,9 @@ def analyze(out: Path) -> dict[str, Any]:
             pm = _mbar_populations(d, system, out, start, grid, disc,
                                    spec["temperatures_K"][0])
             if pm is not None:
-                tv_mbar = np.array([total_variation(p, ref["populations"])
-                                    for p in pm])
+                tv_mbar = np.array([
+                    total_variation(p, ref["populations"])
+                    if np.isfinite(p).all() else np.nan for p in pm])
         time_ns = grid * interval * dt_fs / 1e6
         cost = res_steps + eq_steps + grid * interval * n_rep
         curves[key] = {"time_ns": time_ns, "pops": pops}
@@ -638,7 +639,8 @@ def _method_summary(spec, m, conv_rows, agree_rows, res_rows, system):
 
 def _reservoir_rows(spec, out: Path, system: systems.BenchSystem,
                     frames: ReservoirFrames) -> list[dict[str, Any]]:
-    """The reservoirs' own state populations, whole and by halves.
+    """The reservoirs' own state populations, whole and by halves (with
+    their weights, for a weighted reservoir).
 
     Halves in the order the frames were made: a reservoir whose halves
     disagree had not converged at its own temperature, which no amount of
@@ -658,11 +660,15 @@ def _reservoir_rows(spec, out: Path, system: systems.BenchSystem,
                 seen.add(path)
                 _, res, _, lab = frames(m, start, seed)
                 half = len(lab) // 2
-                w = res.weights
-                pops = (populations(lab, k) if w is None else
-                        np.bincount(lab, weights=w, minlength=k)[:k]
-                        / w.sum())
-                a, b = populations(lab[:half], k), populations(lab[half:], k)
+                w = res.weights if res.weights is not None \
+                    else np.ones(len(lab))
+
+                def pops_of(sl, lab=lab, w=w):
+                    return np.bincount(lab[sl], weights=w[sl],
+                                       minlength=k)[:k] / w[sl].sum()
+
+                pops = pops_of(slice(None))
+                a, b = pops_of(slice(0, half)), pops_of(slice(half, None))
                 shared = m["reservoir"].get("shared")
                 rows.append({
                     "method": m["name"],
@@ -672,8 +678,7 @@ def _reservoir_rows(spec, out: Path, system: systems.BenchSystem,
                     "frames": res.n_frames,
                     "md_steps": (res.meta.get("cost") or {}).get(
                         "md_steps_total", 0),
-                    "halves_tv": total_variation(a, b) if w is None
-                    else None,
+                    "halves_tv": total_variation(a, b),
                     **{f"pop_{s}": pops[j]
                        for j, s in enumerate(system.states)},
                 })
