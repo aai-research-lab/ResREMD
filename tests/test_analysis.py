@@ -219,3 +219,15 @@ def test_coverage_check_flags_certain_disagreement():
     r = coverage_check(top, lab, np.zeros(lab.size), beta(432), beta(432), 2,
                        reservoir_weights=w)
     assert r["max_abs_z"] == np.inf and r["unsupported_states"] == [0]
+
+
+def test_coverage_check_ignores_rounding_when_both_sides_hold_one_state():
+    from resremd.analysis import coverage_check
+    from resremd.thermo import beta
+
+    rng = np.random.default_rng(15)
+    top = np.ones(500, dtype=int)
+    lab = np.ones(2000, dtype=int)
+    h = rng.normal(0.0, 30.0, lab.size)      # weights that do not sum to 1
+    r = coverage_check(top, lab, h, beta(432), beta(520), 2)
+    assert r["max_abs_z"] == 0.0 and r["unsupported_states"] == []

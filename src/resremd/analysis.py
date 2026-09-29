@@ -222,9 +222,13 @@ def coverage_check(top_labels, reservoir_labels, reservoir_h,
         var = (p_top[k] * (1 - p_top[k]) * g_t / top.size
                + g_r * float(np.sum(terms ** 2)))
         diff = p_top[k] - p_res[k]
-        if var > 0:
+        if abs(diff) < 1e-9:
+            # Equal, up to rounding in the weights; also covers a state
+            # both sides hold always or never.
+            z[k] = 0.0
+        elif var > 0:
             z[k] = diff / np.sqrt(var)
-        elif abs(diff) > 1e-12:
+        else:
             # Both sides certain and different: as far apart as can be.
             z[k] = np.copysign(np.inf, diff)
     unsupported = [int(k) for k in range(n_states)
