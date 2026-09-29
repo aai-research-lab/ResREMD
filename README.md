@@ -174,7 +174,15 @@ upper bound, and not as proof that the reservoir is converged.
 | `checkpoint.npz` | the last checkpoint |
 
 The energies, states, and at constant pressure the volumes (and areas), are
-what MBAR needs to combine all temperatures.
+what MBAR needs to combine all temperatures. `resremd.TemperatureReweighting`
+does it (Shirts and Chodera 2008, no pymbar needed): it weights every saved
+frame, from every temperature, to any temperature the ladder overlaps.
+
+```python
+rw = resremd.TemperatureReweighting("remd")
+out = rw.weights(300.0, discard_fraction=0.1)
+# out["weights"][k][i]: frame out["first_frame"] + i of state k's trajectory
+```
 
 ## Stopping and resuming
 
