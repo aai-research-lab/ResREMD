@@ -194,6 +194,14 @@ resbench run bench_ala && resbench analyze bench_ala
 Every job can be run again: finished ones are skipped, and an interrupted
 run or reservoir build resumes from its checkpoint.
 
+The paper's figures come from the analysed benchmarks in one call, with a
+table of which check flags which reservoir:
+
+```
+python benchmarks/plots/plot_paper.py --tier1 bench_exact \
+    --tier1b bench_torsion --budget bench_budget --out paper_figures
+```
+
 ### On the lab HPC (SLURM, no internet)
 
 1. On a machine with internet, fetch the structure the spec names and

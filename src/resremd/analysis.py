@@ -14,6 +14,11 @@ from typing import Any
 import numpy as np
 
 
+#: The temperature check calls a reservoir inconsistent at |z| of this or
+#: more.
+ENSEMBLE_Z = 3.0
+
+
 def _table(path: Path) -> np.ndarray:
     data = np.loadtxt(path, delimiter=",", skiprows=1, ndmin=2)
     return data
@@ -410,7 +415,8 @@ def format_summary(summary: dict[str, Any]) -> str:
         ]
         check = summary.get("reservoir_check")
         if check and check.get("status") == "ok":
-            verdict = "consistent" if abs(check["z"]) < 3 else "INCONSISTENT"
+            verdict = "consistent" if abs(check["z"]) < ENSEMBLE_Z \
+                else "INCONSISTENT"
             implied = check["reservoir_temperature_implied_K"]
             like = (f"{implied:.0f} K" if implied is not None
                     else "no finite temperature")

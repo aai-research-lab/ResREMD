@@ -160,7 +160,7 @@ def convergence(curves, summary, styles, out, fmt, column="tv_error",
     save(fig, out / stem, fmt)
 
 
-def cost_to_converge(summary, styles, out, fmt):
+def cost_to_converge(summary, styles, out, fmt, stem="cost_to_converge"):
     names = list(styles)
     fig, ax = plt.subplots(figsize=(6.0, 0.42 * len(names) + 1.2))
     y = np.arange(len(names))[::-1]
@@ -200,10 +200,10 @@ def cost_to_converge(summary, styles, out, fmt):
                  "interval over seeds, ticks: each seed; open: not "
                  "converged within the budget", loc="left", fontsize=9)
     ax.grid(axis="y", visible=False)
-    save(fig, out / "cost_to_converge", fmt)
+    save(fig, out / stem, fmt)
 
 
-def populations(summary, styles, out, fmt):
+def populations(summary, styles, out, fmt, stem="populations"):
     states = summary["states"]
     ref = summary["reference"]["populations"]
     names = list(styles)
@@ -236,10 +236,10 @@ def populations(summary, styles, out, fmt):
                  f"{summary['reference']['kind']} reference",
                  x=0.01, ha="left", fontsize=9)
     fig.tight_layout(rect=(0, 0, 1, 0.88))
-    save(fig, out / "populations", fmt)
+    save(fig, out / stem, fmt)
 
 
-def agreement(rows, summary, styles, out, fmt):
+def agreement(rows, summary, styles, out, fmt, stem="agreement"):
     if not rows:
         return
     fig, ax = plt.subplots(figsize=(5.4, 3.6))
@@ -266,10 +266,11 @@ def agreement(rows, summary, styles, out, fmt):
                  "agreement shows the starts were forgotten, not that the "
                  "answer is right", loc="left", fontsize=9)
     ax.legend(fontsize=7.5, loc="best")
-    save(fig, out / "agreement", fmt)
+    save(fig, out / stem, fmt)
 
 
-def reservoir_budget(res_rows, summary, styles, out, fmt):
+def reservoir_budget(res_rows, summary, styles, out, fmt,
+                     stem="reservoir_budget"):
     """Cost to converge and the reservoir's halves distance, against the
     reservoir's own cost: how much of a budget the reservoir should take."""
     names = [n for n, st in styles.items() if not st["baseline"]]
@@ -332,7 +333,7 @@ def reservoir_budget(res_rows, summary, styles, out, fmt):
     fig.legend(handles=handles, loc="lower center", ncol=len(handles),
                fontsize=7.5)
     fig.tight_layout(rect=(0, 0.08, 1, 1))
-    save(fig, out / "reservoir_budget", fmt)
+    save(fig, out / stem, fmt)
 
 
 def save(fig, stem: Path, fmt: list[str]) -> None:

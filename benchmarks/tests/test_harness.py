@@ -85,6 +85,7 @@ def test_smoke_end_to_end(tmp_path):
     after = json.loads((out / "runs/remd/right/seed_1/manifest.json")
                        .read_text())["updated"]
     assert before == after
+    _plots_run(out, tmp_path)
     # A reference file from these runs, used by another spec.
     assert main(["reference", str(out), str(tmp_path / "ref.json"),
                  "--methods", "resremd_exact"]) == 0
@@ -192,3 +193,23 @@ def test_a_self_stopping_reservoir_still_spends_the_budget(tmp_path):
     assert auto["reservoir_md_steps"] == meta["cost"]["md_steps_total"]
     assert abs(auto["cost_per_run_md_steps"]
                - remd["cost_per_run_md_steps"]) <= 2 * 250
+
+
+def _plots_run(out, tmp_path):
+    """Both figure scripts run on a finished benchmark (when matplotlib is
+    there)."""
+    import importlib.util
+    import subprocess
+    import sys
+
+    if importlib.util.find_spec("matplotlib") is None:
+        return
+    plots = HERE / "plots"
+    for cmd in (["plot_benchmark.py", str(out), "--format", "png"],
+                ["plot_paper.py", "--tier1", str(out), "--budget", str(out),
+                 "--out", str(tmp_path / "paper"), "--format", "png"]):
+        subprocess.run([sys.executable, str(plots / cmd[0]), *cmd[1:]],
+                       check=True, capture_output=True, text=True)
+    assert (out / "analysis/figures/convergence.png").exists()
+    assert (tmp_path / "paper/fig2_tier1_diagnostics.png").exists()
+    assert (tmp_path / "paper/diagnostics_tier1.csv").exists()
