@@ -213,3 +213,43 @@ def _plots_run(out, tmp_path):
     assert (out / "analysis/figures/convergence.png").exists()
     assert (tmp_path / "paper/fig2_tier1_diagnostics.png").exists()
     assert (tmp_path / "paper/diagnostics_tier1.csv").exists()
+
+
+REST2_SPEC = """
+name: rest2_test
+system: {name: torsion_model}
+temperatures_K: [300.0, 900.0, 3000.0]
+seeds: [1]
+starts: {trans: {}}
+run: {production_steps: 25000, exchange_interval_steps: 250,
+      trajectory_interval_steps: 250, equilibration_ns: 0.0,
+      minimize: false, save_selection: all, platform: Reference,
+      rest2: true, rest2_selection: all}
+methods:
+  - name: rest2
+  - name: rest2_res
+    reservoir:
+      generate: {temperature_K: 3000.0, rest2_run_temperature_K: 300.0,
+                 rest2_selection: all, duration_ns: 0.5,
+                 frame_interval_steps: 250, equilibration_ns: 0.01,
+                 platform: Reference}
+reference: {kind: exact}
+analysis: {threshold_tv: 0.05, points: 5, mbar: true}
+slurm: {gres: null}
+"""
+
+
+def test_rest2_methods_run_and_analyse(tmp_path):
+    (tmp_path / "s.yml").write_text(REST2_SPEC)
+    out = tmp_path / "bench"
+    assert main(["plan", str(tmp_path / "s.yml"), str(out)]) == 0
+    jobs.run_all(out)
+    summary = analyze.analyze(out)
+    res = summary["methods"]["rest2_res"]
+    assert res["reservoir_acceptance"] == 1.0       # its own top state
+    assert res["coverage_z_max_abs"] is not None
+    assert summary["methods"]["rest2"]["starts"]["trans"][
+        "final_tv_error_mbar_mean"] is not None
+    man = json.loads((out / "runs/rest2/trans/seed_1/manifest.json")
+                     .read_text())
+    assert man["rest2"]["scales"][-1] < 0.33

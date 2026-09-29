@@ -1,0 +1,46 @@
+# Tier 1b, REST2. At equal cost, on the 80 kJ/mol torsion: temperature REMD,
+# REST2 (the solute's torsion scaled down to an effective 3000 K), REST2 fed
+# by a reservoir of its own top state, and temperature REMD fed by the
+# bias-weighted, self-stopping reservoir of exact_torsion_budget. The answer
+# is exact. REST2's energy evaluations for exchanges (two per replica per
+# cycle) are not counted as MD steps.
+name: exact_torsion_rest2
+system: {name: torsion_model}
+temperatures_K: [300.0, 360.0, 432.0]
+seeds: [1, 2, 3, 4, 5]
+run:
+  production_steps: 5000000        # 10 ns per replica, for the costliest
+  exchange_interval_steps: 250
+  trajectory_interval_steps: 250
+  friction_per_ps: 5.0
+  equilibration_ns: 0.0
+  minimize: false
+  save_selection: all
+  platform: Reference
+methods:
+  - name: remd
+  - name: rest2
+    temperatures_K: [300.0, 533.48, 948.68, 1687.0, 3000.0]
+    run: {rest2: true, rest2_selection: all}
+  - name: rest2_res
+    note: REST2 with a reservoir of its own top state, stopping itself
+    temperatures_K: [300.0, 533.48, 948.68, 1687.0, 3000.0]
+    run: {rest2: true, rest2_selection: all}
+    reservoir:
+      generate: {temperature_K: 3000.0, rest2_run_temperature_K: 300.0,
+                 rest2_selection: all, duration_ns: 20.0,
+                 frame_interval_steps: 500, equilibration_ns: 0.1,
+                 friction_per_ps: 5.0, platform: Reference,
+                 convergence_torsions: [phi], convergence_tv: 0.02}
+  - name: res_biased_auto
+    note: temperature REMD with the bias-weighted reservoir, stopping itself
+    reservoir:
+      generate: {temperature_K: 520.0, duration_ns: 20.0,
+                 frame_interval_steps: 500, equilibration_ns: 0.1,
+                 friction_per_ps: 5.0, platform: Reference,
+                 bias_torsions: [{atoms: phi, energy: "-k*sin(theta)^2",
+                                  parameters: {k: 70.0}}],
+                 convergence_torsions: [phi], convergence_tv: 0.02}
+reference: {kind: exact}
+analysis: {threshold_tv: 0.02, threshold_jsd: 0.01, points: 40, mbar: true}
+slurm: {gres: null, cpus_per_task: 1}

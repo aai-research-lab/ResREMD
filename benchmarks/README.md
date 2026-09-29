@@ -50,6 +50,12 @@ resbench reference bench_pro_ref bench_pro/proline_implicit_reference.json \
     --methods biased_300 --from-reservoirs
 ```
 
+A method runs REST2 with `run: {rest2: true}` and its own
+`temperatures_K` (the solute's effective temperatures). Its reservoir can
+be generated with the same scaling (`rest2_run_temperature_K` in the
+`generate` block). REST2's two extra energy evaluations per replica per
+cycle are not counted as MD steps.
+
 A `generate` block can also stop itself once the halves of chosen torsions
 agree, with `convergence_torsions` (named, as above) and `convergence_tv`;
 `duration_ns` is then the most it may take. The plan budgets for that
@@ -152,6 +158,7 @@ tier 1b only runs and reservoirs from opposite starts expose it.
 | `exact_defects.yml` | tier 1: seven reservoirs, each flawed in one way, against plain REMD | CPU, about an hour |
 | `exact_torsion.yml` | tier 1b: plain against bias-weighted reservoirs across a barrier | CPU, about an hour |
 | `exact_torsion_budget.yml` | tier 1b: how much of a fixed budget the reservoir should take | CPU, about an hour |
+| `exact_torsion_rest2.yml` | tier 1b: REST2, REST2 with a reservoir, and a bias-weighted reservoir, at equal cost | CPU, about an hour |
 | `proline_implicit_reference.yml` | reweighted reservoirs at 300 K for tier 2b's reference | one GPU, a day |
 | `proline_implicit.yml` | tier 2b: plain against bias-weighted reservoirs | one GPU, a day |
 | `proline_explicit_reference.yml`, `proline_explicit.yml` | tier 2b in water | GPU-days |
