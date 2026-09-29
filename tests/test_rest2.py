@@ -115,11 +115,25 @@ def test_rest2_samples_every_state_exactly(tmp_path):
         phi[st["index"]] = md.compute_dihedrals(t, [[0, 1, 2, 3]])[:, 0]
     for target in (300.0, 700.0):
         w = rw.weights(target, discard_fraction=0.1)
-        cis = sum(float(np.sum(ws * (np.abs(phi[k][w["first_frame"]:])
-                                     < np.pi / 2)))
-                  for k, ws in w["weights"].items())
-        assert cis == pytest.approx(testsystems.cis_fraction(target),
-                                    abs=0.015), target
+        cis, se = _weighted_mean(
+            {k: (ws, (np.abs(phi[k][w["first_frame"]:]) < np.pi / 2))
+             for k, ws in w["weights"].items()})
+        exact = testsystems.cis_fraction(target)
+        assert abs(cis - exact) < max(4.5 * se, 0.005), (target, cis, exact,
+                                                          se)
+
+
+def _weighted_mean(parts):
+    """An MBAR estimate sum(w f) and its standard error, from each state's
+    correlated series w (f - estimate), with the free energies taken as
+    known."""
+    est = sum(float(np.sum(w * f)) for w, f in parts.values())
+    var = 0.0
+    for w, f in parts.values():
+        y = w * (f - est)
+        if y.var() > 0:
+            var += y.size * y.var() * statistical_inefficiency(y)
+    return est, float(np.sqrt(var))
 
 
 def test_a_reservoir_of_the_top_state_is_always_accepted(tmp_path):
