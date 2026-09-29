@@ -1,7 +1,11 @@
 # Tier 1b, budget. How much of a fixed budget should the reservoir take?
 # The bias-weighted reservoir of exact_torsion (k = 70) at 1, 3, 10 and 20
-# ns. At equal total cost, a shorter reservoir leaves more for replica
-# exchange; too short a one is biased.
+# ns, and one that stops itself once its halves agree (at most 20 ns). At
+# equal total cost, a shorter reservoir leaves more for replica exchange;
+# too short a one is biased. The self-stopping one is planned for its 20 ns
+# at most; its run is lengthened to the budget once the reservoir is built.
+# Its halves column is close to its own stopping statistic, so it is not
+# independent evidence for that method.
 name: exact_torsion_budget
 system: {name: torsion_model}
 temperatures_K: [300.0, 360.0, 432.0]
@@ -44,6 +48,15 @@ methods:
                  friction_per_ps: 5.0, platform: Reference,
                  bias_torsions: [{atoms: phi, energy: "-k*sin(theta)^2",
                                   parameters: {k: 70.0}}]}
+  - name: res_auto
+    note: stops when the halves of phi agree within 0.02, at most 20 ns
+    reservoir:
+      generate: {temperature_K: 520.0, duration_ns: 20.0,
+                 frame_interval_steps: 500, equilibration_ns: 0.1,
+                 friction_per_ps: 5.0, platform: Reference,
+                 bias_torsions: [{atoms: phi, energy: "-k*sin(theta)^2",
+                                  parameters: {k: 70.0}}],
+                 convergence_torsions: [phi], convergence_tv: 0.02}
 reference: {kind: exact}
 analysis: {threshold_tv: 0.02, threshold_jsd: 0.01, points: 40, mbar: true}
 slurm: {gres: null, cpus_per_task: 1}

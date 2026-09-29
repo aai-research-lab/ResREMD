@@ -47,7 +47,9 @@ def estimate(out: Path, ns_per_day: float | None) -> str:
             f"{m['name']:<22}{n_runs:>4} runs x {p['replicas']:>2} replicas"
             f"  {p['production_steps'] * p['timestep_fs'] / 1e6:>8.2f} ns "
             f"each  {p['total_steps'] / 1e6:>9.2f}e6 steps per run"
-            f"  {reservoirs:>3} reservoirs")
+            f"  {reservoirs:>3} reservoirs"
+            + ("  (reservoir at most this; the run is lengthened to the "
+               "budget once it is built)" if p.get("self_stopping") else ""))
     lines.append(f"{'total':<22}{total_steps / 1e6:>10.1f}e6 MD steps, "
                  f"about {total_ns:.1f} ns of dynamics")
     if spec["equal_cost"]:

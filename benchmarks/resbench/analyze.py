@@ -616,8 +616,13 @@ def _method_summary(spec, m, conv_rows, agree_rows, res_rows, system,
         "runs": len(rows),
         "replicas": plan["replicas"],
         "production_steps": plan["production_steps"],
-        "cost_per_run_md_steps": plan["total_steps"],
-        "reservoir_md_steps": plan["reservoir_steps"],
+        # What the runs actually cost, which a self-stopping reservoir
+        # decides; the plan's figures are kept beside them.
+        "cost_per_run_md_steps": float(np.mean([r["run_cost"]
+                                                for r in rows])),
+        "reservoir_md_steps": float(np.mean([r["reservoir_md_steps"]
+                                             for r in rows])),
+        "planned_cost_per_run_md_steps": plan["total_steps"],
         "starts": per_start,
         "both_starts_converged_tv_cost_md_steps": _median_block(
             both, max(r["run_cost"] for r in rows)) if both else None,

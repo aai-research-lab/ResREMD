@@ -151,3 +151,44 @@ def test_biased_reservoirs_give_the_exact_torsion_populations(tmp_path):
         < 0.03
     summary = analyze.analyze(out)
     assert set(summary["methods"]) == {"remd"}
+
+
+AUTO_SPEC = """
+name: auto_test
+system: {name: torsion_model}
+temperatures_K: [300.0, 400.0]
+seeds: [1]
+starts: {trans: {}}
+run: {production_steps: 50000, exchange_interval_steps: 250,
+      trajectory_interval_steps: 250, equilibration_ns: 0.0,
+      minimize: false, save_selection: all, platform: Reference}
+methods:
+  - name: remd
+  - name: res_auto
+    reservoir:
+      generate: {temperature_K: 520.0, duration_ns: 8.0,
+                 frame_interval_steps: 500, equilibration_ns: 0.01,
+                 platform: Reference,
+                 bias_torsions: [{atoms: phi, energy: "-k*sin(theta)^2",
+                                  parameters: {k: 70.0}}],
+                 convergence_torsions: [phi], convergence_tv: 0.3}
+reference: {kind: exact}
+analysis: {threshold_tv: 0.05, points: 5}
+slurm: {gres: null}
+"""
+
+
+def test_a_self_stopping_reservoir_still_spends_the_budget(tmp_path):
+    (tmp_path / "s.yml").write_text(AUTO_SPEC)
+    out = tmp_path / "bench"
+    assert main(["plan", str(tmp_path / "s.yml"), str(out)]) == 0
+    jobs.run_all(out)
+    meta = json.loads((out / "reservoirs/res_auto/trans/seed_1/"
+                       "reservoir.json").read_text())
+    assert meta["convergence"]["converged"]
+    assert meta["cost"]["md_steps_total"] < 4_000_000 / 2
+    summary = analyze.analyze(out)
+    auto, remd = summary["methods"]["res_auto"], summary["methods"]["remd"]
+    assert auto["reservoir_md_steps"] == meta["cost"]["md_steps_total"]
+    assert abs(auto["cost_per_run_md_steps"]
+               - remd["cost_per_run_md_steps"]) <= 2 * 250

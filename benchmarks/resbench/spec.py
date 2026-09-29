@@ -295,7 +295,9 @@ def plan_costs(spec: dict[str, Any]) -> dict[str, dict[str, Any]]:
         plan[m["name"]] = {"replicas": n, "timestep_fs": dt,
                            "exchange_interval_steps": interval,
                            "equilibration_steps": eq,
-                           "reservoir_steps": res, "production_steps": prod}
+                           "reservoir_steps": res, "production_steps": prod,
+                           "own_production_steps": prod,
+                           "self_stopping": self_stopping(m)}
     if spec["equal_cost"]:
         def total(p):
             return (p["reservoir_steps"] + p["replicas"]
@@ -303,11 +305,8 @@ def plan_costs(spec: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
         budget = max(total(p) for p in plan.values())
         for p in plan.values():
-            need = (budget - p["reservoir_steps"]) / p["replicas"] \
-                - p["equilibration_steps"]
-            p["production_steps"] = max(p["production_steps"], int(
-                math.ceil(need / p["exchange_interval_steps"] - 1e-9))
-                * p["exchange_interval_steps"])
+            p["budget_steps"] = budget
+            p["production_steps"] = _production_for(p, p["reservoir_steps"])
     for p in plan.values():
         p["total_steps"] = (p["reservoir_steps"] + p["replicas"]
                             * (p["equilibration_steps"]
@@ -315,20 +314,43 @@ def plan_costs(spec: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return plan
 
 
+def _production_for(p: dict[str, Any], reservoir_steps: float) -> int:
+    """Production that brings a run up to the budget, whole intervals."""
+    need = (p["budget_steps"] - reservoir_steps) / p["replicas"] \
+        - p["equilibration_steps"]
+    return max(p["own_production_steps"], int(
+        math.ceil(need / p["exchange_interval_steps"] - 1e-9))
+        * p["exchange_interval_steps"])
+
+
+def self_stopping(m: dict[str, Any]) -> bool:
+    """A generated reservoir that stops once converged costs what it
+    used, known only once it is built."""
+    g = (m.get("reservoir") or {}).get("generate") or {}
+    return g.get("convergence_tv") is not None
+
+
 def has_runs(m: dict[str, Any]) -> bool:
     """False for a reservoir-only method (one kept as a reference)."""
     return bool(m.get("runs", True))
 
 
-def run_settings(spec: dict[str, Any], m: dict[str, Any]) -> dict[str, Any]:
+def run_settings(spec: dict[str, Any], m: dict[str, Any],
+                 reservoir_steps: float | None = None) -> dict[str, Any]:
     """What resremd.run is given for this method, production length fixed.
 
     A reservoir method always saves its top temperature as well as the
-    lowest, for the coverage check.
+    lowest, for the coverage check. With equal cost, a self-stopping
+    reservoir's run is sized from ``reservoir_steps``, what the reservoir
+    actually used, so it too spends the budget.
     """
     s = {**spec["run"], **(m.get("run") or {})}
     s.pop("duration_ns", None)
-    s["production_steps"] = spec["_plan"][m["name"]]["production_steps"]
+    p = spec["_plan"][m["name"]]
+    s["production_steps"] = p["production_steps"]
+    if reservoir_steps is not None and spec["equal_cost"] \
+            and p["self_stopping"]:
+        s["production_steps"] = _production_for(p, reservoir_steps)
     if m.get("reservoir"):
         top = len(ladder_of(spec, m)) - 1
         save = s.get("save_states", "all")

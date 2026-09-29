@@ -331,13 +331,34 @@ def build_reservoir(spec: dict[str, Any], out: Path, method: dict[str, Any],
         return
     resume = (path / "build_checkpoint.npz").exists()
     settings = dict(res["generate"])
+    system = systems.get(spec["system"])
     if settings.get("bias_torsions"):
-        system = systems.get(spec["system"])
         settings["bias_torsions"] = resolve_biases(
             system, prepared_dir(out, start), settings["bias_torsions"])
+    if settings.get("convergence_torsions"):
+        settings["convergence_torsions"] = resolve_torsions(
+            system, prepared_dir(out, start),
+            settings["convergence_torsions"])
     resremd.generate_reservoir(prepared=str(prepared_dir(out, start)),
                                output=str(path), resume=resume,
                                random_seed=job_seed, **settings)
+
+
+def resolve_torsions(system: systems.BenchSystem, prepared: Path,
+                     torsions: list[Any]) -> list[list[int]]:
+    """Torsions given by name (``omega``) or as four atom indices."""
+    names = None
+    out = []
+    for t in torsions:
+        if isinstance(t, str):
+            if names is None:
+                names = system.torsions(load_prepared(prepared).topology)
+            if t not in names:
+                raise ValueError(f"{system.name} names no torsion {t!r}; it "
+                                 f"names {', '.join(names) or 'none'}.")
+            t = names[t]
+        out.append([int(a) for a in t])
+    return out
 
 
 def resolve_biases(system: systems.BenchSystem, prepared: Path,
@@ -369,12 +390,16 @@ def run_one(spec: dict[str, Any], out: Path, method: dict[str, Any],
         logger.info("Run %s is complete; skipping.", path)
         return
     res = reservoir_dir(out, spec, method, start, seed)
+    used = None
+    if res is not None and specs.self_stopping(method):
+        used = json.loads((res / "reservoir.json").read_text())["cost"][
+            "md_steps_total"]
     resremd.run(prepared=str(prepared_dir(out, start)), output=str(path),
                 reservoir=None if res is None else str(res),
                 temperatures_K=specs.ladder_of(spec, method),
                 random_seed=specs.job_seed(seed, method["name"], start, 1),
                 resume=(path / "checkpoint.npz").exists(),
-                **specs.run_settings(spec, method))
+                **specs.run_settings(spec, method, used))
 
 
 def status(out: Path) -> list[tuple[str, str]]:

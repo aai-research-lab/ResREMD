@@ -50,6 +50,11 @@ resbench reference bench_pro_ref bench_pro/proline_implicit_reference.json \
     --methods biased_300 --from-reservoirs
 ```
 
+A `generate` block can also stop itself once the halves of chosen torsions
+agree, with `convergence_torsions` (named, as above) and `convergence_tv`;
+`duration_ns` is then the most it may take. The plan budgets for that
+most, and the analysis charges what the reservoir actually used.
+
 ## How runs are compared
 
 - **At equal cost.** With `equal_cost: true` (the default) every run
