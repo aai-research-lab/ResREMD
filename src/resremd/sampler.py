@@ -1,4 +1,5 @@
-"""Temperature replica exchange, coupled to a reservoir when one is given.
+"""Temperature replica exchange, or REST2, coupled to a reservoir when one
+is given.
 
 One exchange cycle:
 
@@ -15,6 +16,22 @@ One exchange cycle:
    temperature; the reservoir is unchanged.
 
 The criteria are in :mod:`resremd.acceptance`.
+
+With REST2 (:mod:`resremd.rest2`) every replica runs at the lowest
+temperature T0 and the states differ by the scale of the solute's
+interactions instead. Each replica's energy is then known at every scale
+from three evaluations, and exchanges use it:
+
+    log alpha = -beta0 [U_a(x_j) + U_b(x_i) - U_a(x_i) - U_b(x_j)]
+
+with no velocity rescaling. A reservoir exchange is an independence move
+with the reservoir's own distribution as the proposal,
+
+    log alpha = [u_top(x) - u_R(x)] - [u_top(y) - u_R(y)],
+
+u the reduced potential of the top state and of the reservoir (its real
+temperature and REST2 scale; zero for a non-Boltzmann reservoir). For a
+temperature ladder with an unscaled reservoir this is the criterion above.
 """
 
 from __future__ import annotations
@@ -65,8 +82,13 @@ CITATIONS = [
     "doi:10.1021/acs.jpcb.3c06662",
 ]
 
+REST2_CITATION = (
+    "Wang L, Friesner RA, Berne BJ. Replica exchange with solute scaling: a "
+    "more efficient version of replica exchange with solute tempering "
+    "(REST2). J. Phys. Chem. B 2011, 115, 9431-9438. doi:10.1021/jp204407d")
+
 #: Settings that decide what is sampled. A resumed run must match them.
-_SCIENTIFIC = ("temperatures_K", "exchange_interval_steps",
+_SCIENTIFIC = ("temperatures_K", "rest2", "exchange_interval_steps",
                "reservoir_interval", "reservoir_reweight", "integrator",
                "timestep_fs",
                "friction_per_ps", "trajectory_interval_steps", "save_states",
@@ -200,6 +222,34 @@ class _Run:
                          if self.reservoir else None)
         self.temperatures = self.plan["temperatures_K"]
         self.betas = [beta(t) for t in self.temperatures]
+        self.rest2 = None
+        self.scales = None
+        if o["rest2"]:
+            from .rest2 import rest2_system, scale_of, solute_digest
+
+            solute = select_atoms(self.prepared.topology,
+                                  o["rest2_selection"], o["rest2_atoms"])
+            system, info = rest2_system(system, solute)
+            self.T0 = self.temperatures[0]
+            self.beta0 = beta(self.T0)
+            self.scales = [scale_of(self.T0, t) for t in self.temperatures]
+            self.rest2 = {**info, "solute_sha256": solute_digest(solute),
+                          "run_temperature_K": self.T0,
+                          "scales": self.scales}
+            logger.info("REST2: %d solute atoms at %g K, scales %s",
+                        solute.size, self.T0,
+                        ", ".join(f"{x:.3f}" for x in self.scales))
+        if self.reservoir is not None and self.reservoir.rest2:
+            if self.rest2 is None:
+                raise InputError(
+                    "The reservoir was sampled with REST2 scaling, which "
+                    "only a REST2 run (`rest2: true`) can use.",
+                    code="resremd.reservoir.rest2")
+            if self.reservoir.rest2.get("solute_sha256") != \
+                    self.rest2["solute_sha256"]:
+                raise InputError(
+                    "The reservoir's REST2 solute is not this run's: the two "
+                    "scale different atoms.", code="resremd.reservoir.rest2")
         system, ensemble = simulated_system(
             system, ensemble=o["ensemble"], pressure_bar=o["pressure_bar"],
             temperature_K=self.temperatures[0],
@@ -229,6 +279,8 @@ class _Run:
                 "kind": self.reservoir.kind,
                 "temperature_K": self.reservoir.temperature_K,
                 "frames_sha256": self.reservoir.content_digest()}),
+            "rest2_solute": None if self.rest2 is None
+            else self.rest2["solute_sha256"],
             **{k: (self.temperatures if k == "temperatures_K" else
                    self.plan["trajectory_interval_steps"]
                    if k == "trajectory_interval_steps" else
@@ -274,7 +326,8 @@ class _Run:
             temperature_K=self.temperatures[0], platform=o["platform"],
             precision=o["precision"], devices=o["devices"],
             contexts_per_device=o["contexts_per_device"],
-            cpu_threads=o["cpu_threads"], seeds=self.seed_rng)
+            cpu_threads=o["cpu_threads"], seeds=self.seed_rng,
+            rest2=self.rest2 is not None)
         logger.info("%d replicas, %s", n, ", ".join(
             f"{t:.2f}" for t in self.temperatures) + " K")
         logger.info("Engine: %s", self.engine.describe())
@@ -316,16 +369,25 @@ class _Run:
         import openmm
 
         logger.info("Reservoir: %s", self.reservoir.describe())
+        rest2 = self.rest2 is not None
         energies = self.reservoir.energies(
-            self.engine.evaluator(),
+            self.engine.terms_evaluator() if rest2
+            else self.engine.evaluator(),
             key_fields={"system_sha256": self.system_sha256,
                         "platform": self.engine.platform,
                         "precision": self.options["precision"]
                         if self.engine.platform in ("CUDA", "HIP", "OpenCL")
                         else None,
-                        "openmm": openmm.__version__},
-            progress=logger.info)
+                        "openmm": openmm.__version__,
+                        "rest2": None if not rest2
+                        else self.rest2["solute_sha256"]},
+            progress=logger.info, terms=rest2)
         pot = energies["potential_kjmol"]
+        if rest2:
+            from .rest2 import energy
+
+            # The reservoir's own Hamiltonian is the one at its scale.
+            pot = energy(energies["rest2_terms"], self.reservoir.scale)
         found = []
         # Reweight only when the Hamiltonians differ beyond precision noise;
         # otherwise the weights would only carry that noise.
@@ -343,6 +405,18 @@ class _Run:
         for w in found:
             logger.warning(w)
             self.warnings.append(w)
+        if rest2:
+            from .rest2 import energy
+
+            v, a = energies["volume_nm3"], energies["area_nm2"]
+            u_top = self.beta0 * self.ensemble.enthalpy(
+                energy(energies["rest2_terms"], self.scales[-1]), v, a)
+            u_res = self.reservoir.beta * self.ensemble.enthalpy(pot, v, a)
+            #: u_top(y) - u_R(y) for every frame; the exchange needs only it.
+            self.res_delta = u_top - u_res
+            self.res_h = None
+            np.save(self.out / "reservoir_delta.npy", self.res_delta)
+            return
         self.res_h = self.ensemble.enthalpy(energies["potential_kjmol"],
                                             energies["volume_nm3"],
                                             energies["area_nm2"])
@@ -381,7 +455,8 @@ class _Run:
             if self.stop.requested:
                 raise _StoppedEarly
             step = min(piece, left)
-            self.engine.run(self.replicas, self._temps(), step, set())
+            self.engine.run(self.replicas, self._temps(), step, set(),
+                            self._scales())
             left -= step
             if left <= 0:
                 break
@@ -441,7 +516,15 @@ class _Run:
                 "extended, not shortened.", code="resremd.resume.shorter")
 
     def _temps(self) -> list[float]:
+        if self.rest2 is not None:
+            return [self.T0] * len(self.temperatures)
         return [self.temperatures[self.state_of[r]]
+                for r in range(len(self.temperatures))]
+
+    def _scales(self) -> list[float] | None:
+        if self.rest2 is None:
+            return None
+        return [self.scales[self.state_of[r]]
                 for r in range(len(self.temperatures))]
 
     # -- files --------------------------------------------------------------
@@ -468,9 +551,16 @@ class _Run:
             if self.reservoir is not None else None
         self.log_reservoir = csv(
             "reservoir_exchanges.csv",
-            head + ["replica", "frame", "h_replica_kjmol", "h_frame_kjmol",
-                    "log_acceptance", "accepted"]) \
+            head + ["replica", "frame"]
+            + (["delta_replica", "delta_frame"] if self.rest2 is not None
+               else ["h_replica_kjmol", "h_frame_kjmol"])
+            + ["log_acceptance", "accepted"]) \
             if self.reservoir is not None else None
+        # REST2: each replica's A, B, C every cycle, its energy at any scale.
+        self.log_terms = csv(
+            "rest2_terms.csv",
+            head + [f"r{r}_{x}" for r in range(n) for x in "abc"]) \
+            if self.rest2 is not None else None
         dt_ps = self.options["timestep_fs"] / 1000.0
         interval = self.plan["trajectory_interval_steps"]
         (self.out / "trajectories").mkdir(exist_ok=True)
@@ -574,9 +664,13 @@ class _Run:
             "tool": "resremd",
             "version": __version__,
             "status": status,
-            "method": ("reservoir replica exchange molecular dynamics"
-                       if self.reservoir is not None else
-                       "temperature replica exchange molecular dynamics"),
+            "method": ("REST2 " if self.rest2 is not None else "")
+            + ("reservoir replica exchange molecular dynamics"
+               if self.reservoir is not None else
+               "replica exchange molecular dynamics"
+               if self.rest2 is not None else
+               "temperature replica exchange molecular dynamics"),
+            "rest2": self.rest2,
             "started": self.started,
             "updated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "system": {
@@ -590,6 +684,8 @@ class _Run:
             },
             "states": [
                 {"index": s, "temperature_K": t,
+                 "rest2_scale": None if self.scales is None
+                 else self.scales[s],
                  "trajectory": (f"trajectories/state_{s:03d}_{t:.2f}K.dcd"
                                 if s in self.dcd_states else None)}
                 for s, t in enumerate(self.temperatures)],
@@ -601,6 +697,7 @@ class _Run:
                 "frames_sha256": self.reservoir.content_digest(),
                 "interval_cycles": o["reservoir_interval"],
                 "reweighted_effective_frames": self.reservoir.reweighted,
+                "rest2": self.reservoir.rest2,
             },
             "progress": {
                 "cycles_done": self.cycle,
@@ -636,7 +733,8 @@ class _Run:
             "settings": {**o, **self.plan},
             "warnings": self.warnings,
             "files": {"topology": "topology.pdb", "log": "run.log", **files},
-            "citations": CITATIONS,
+            "citations": CITATIONS + ([REST2_CITATION]
+                                      if self.rest2 is not None else []),
         }
         write_json(self.out / "manifest.json", self.manifest)
 
@@ -670,11 +768,15 @@ class _Run:
                 if self.dcd_replicas:
                     want = set(range(n))
             seg = self.engine.run(self.replicas, self._temps(), interval,
-                                  want)
+                                  want, self._scales())
             h = np.array([self.ensemble.enthalpy(
                 seg[r].potential_kjmol,
                 *_vol_area(seg[r].box)) for r in range(n)])
+            terms = np.array([seg[r].terms for r in range(n)]) \
+                if self.rest2 is not None else None
             head = [self.cycle + 1, time_ps]
+            if terms is not None:
+                self.log_terms.write(head + terms.ravel().tolist())
             self.log_states.write(head + self.state_of)
             self.log_energy.write(head + [seg[r].potential_kjmol
                                           for r in range(n)])
@@ -695,11 +797,17 @@ class _Run:
                                              seg[r].box)
                 for r, d in self.dcd_replicas.items():
                     d.write(seg[r].frame[atoms], seg[r].box)
-            self._swap(h)
+            if terms is None:
+                self._swap(h)
+            else:
+                self._swap_rest2(terms)
             self.cycle += 1
             if self.reservoir is not None and \
                     self.cycle % o["reservoir_interval"] == 0:
-                self._reservoir_exchange(h, head)
+                if terms is None:
+                    self._reservoir_exchange(h, head)
+                else:
+                    self._reservoir_exchange_rest2(terms, seg, head)
             if self.cycle % log_every == 0 or self.cycle == target:
                 self._report(t_start, c_start, time_ps)
             if step % chk == 0 and self.cycle < target:
@@ -722,6 +830,48 @@ class _Run:
                 t_lo, t_hi = self.temperatures[s], self.temperatures[s + 1]
                 self.replicas[i].velocity_scale *= math.sqrt(t_hi / t_lo)
                 self.replicas[j].velocity_scale *= math.sqrt(t_lo / t_hi)
+
+    def _swap_rest2(self, terms: np.ndarray) -> None:
+        from .rest2 import energy
+
+        n = len(self.temperatures)
+        parity = int(self.exchange_rng.integers(2))
+        for s in range(parity, n - 1, 2):
+            i, j = self.replica_at[s], self.replica_at[s + 1]
+            sa, sb = self.scales[s], self.scales[s + 1]
+            la = -self.beta0 * (energy(terms[j], sa) + energy(terms[i], sb)
+                                - energy(terms[i], sa) - energy(terms[j], sb))
+            self.pair_attempts[s] += 1
+            if accept(la, self.exchange_rng):
+                self.pair_accepts[s] += 1
+                self.replica_at[s], self.replica_at[s + 1] = j, i
+                self.state_of[i], self.state_of[j] = s + 1, s
+
+    def _reservoir_exchange_rest2(self, terms: np.ndarray, seg: dict,
+                                  head: list[Any]) -> None:
+        from .rest2 import energy
+
+        top = len(self.temperatures) - 1
+        r = self.replica_at[top]
+        k = self.reservoir.draw(self.exchange_rng)
+        v, a = _vol_area(seg[r].box)
+        u_top = self.beta0 * self.ensemble.enthalpy(
+            energy(terms[r], self.scales[top]), v, a)
+        u_res = self.reservoir.beta * self.ensemble.enthalpy(
+            energy(terms[r], self.reservoir.scale), v, a)
+        delta = float(u_top - u_res)
+        la = delta - float(self.res_delta[k])
+        ok = accept(la, self.exchange_rng)
+        self.res_attempts += 1
+        self.log_reservoir.write(head + [r, k, delta,
+                                         float(self.res_delta[k]), la, ok])
+        if ok:
+            self.res_accepts += 1
+            self.res_frames.add(k)
+            pos, box = self.reservoir.frame(k)
+            self.replicas[r].reset = (pos, box,
+                                      int(self.seed_rng.integers(1, 2**31 - 1)))
+            self.replicas[r].origin = k
 
     def _reservoir_exchange(self, h: np.ndarray, head: list[Any]) -> None:
         top = len(self.temperatures) - 1
@@ -786,7 +936,7 @@ _RUN_FILES = frozenset({
     "run.log", "topology.pdb", "states.csv", "energies.csv", "volumes.csv",
     "areas.csv", "origins.csv", "reservoir_exchanges.csv", "trajectories",
     "replicas", "checkpoint.tmp.npz", "reservoir_enthalpy_kjmol.npy",
-    "reservoir_weights.npy"})
+    "reservoir_weights.npy", "reservoir_delta.npy", "rest2_terms.csv"})
 
 
 def _claim_output(out: Path) -> None:

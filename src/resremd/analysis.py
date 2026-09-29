@@ -254,6 +254,8 @@ def _reservoir_enthalpy(run_dir: Path, manifest: dict[str, Any]
     saved = run_dir / "reservoir_enthalpy_kjmol.npy"
     if saved.exists():
         return np.load(saved)
+    if manifest.get("rest2"):
+        return None
     # Runs from before the enthalpies were saved: find the reservoir's cache
     # for this System and platform.
     res = manifest.get("reservoir") or {}
@@ -275,6 +277,35 @@ def _reservoir_enthalpy(run_dir: Path, manifest: dict[str, Any]
     return None
 
 
+def _rest2_deltas(run_dir: Path, manifest: dict[str, Any], reservoir
+                  ) -> tuple[np.ndarray, np.ndarray]:
+    """REST2: u_top - u_R for the top replica at every cycle, and for every
+    reservoir frame (as the run computed it)."""
+    from .rest2 import energy
+    from .thermo import Ensemble, beta
+
+    info = manifest["rest2"]
+    states = _table(run_dir / "states.csv")[:, 2:].astype(int)
+    terms = _table(run_dir / "rest2_terms.csv")[:, 2:]
+    n = states.shape[1]
+    terms = terms.reshape(len(terms), n, 3)
+    top = n - 1
+    rows = np.arange(len(states))
+    who = np.argmax(states == top, axis=1)
+    t = terms[rows, who]
+    ensemble = Ensemble.from_dict(manifest["system"]["ensemble"])
+    vol = area = np.zeros(len(rows))
+    if ensemble.constant_pressure:
+        vol = _table(run_dir / "volumes.csv")[:, 2:][rows, who]
+        if (run_dir / "areas.csv").exists():
+            area = _table(run_dir / "areas.csv")[:, 2:][rows, who]
+    u_top = beta(info["run_temperature_K"]) * ensemble.enthalpy(
+        energy(t, info["scales"][top]), vol, area)
+    u_res = reservoir.beta * ensemble.enthalpy(
+        energy(t, reservoir.scale), vol, area)
+    return u_top - u_res, np.load(run_dir / "reservoir_delta.npy")
+
+
 def _run_weights(run_dir: Path, reservoir) -> np.ndarray | None:
     """The weights the run drew frames by: its own, when it reweighted the
     reservoir to its Hamiltonian, else the reservoir's."""
@@ -291,6 +322,18 @@ def reservoir_check(run_dir: str | Path) -> dict[str, Any] | None:
     manifest = json.loads((run_dir / "manifest.json").read_text())
     if manifest.get("reservoir") is None:
         return None
+    if manifest.get("rest2"):
+        # In the reduced-energy difference between the top state and the
+        # reservoir the same relation holds with slope one.
+        reservoir = Reservoir.open(manifest["reservoir"]["path"])
+        top_d, res_d = _rest2_deltas(run_dir, manifest, reservoir)
+        out = ensemble_check(top_d, res_d, 1.0, 0.0,
+                             reservoir_weights=_run_weights(run_dir,
+                                                            reservoir))
+        if out.get("status") == "ok":
+            out["reservoir_temperature_implied_K"] = None
+            out["rest2"] = True
+        return out
     res_h = _reservoir_enthalpy(run_dir, manifest)
     if res_h is None:
         return {"status": "no_energies"}
@@ -331,6 +374,11 @@ def reservoir_coverage(run_dir: str | Path, top_labels, reservoir_labels,
     if len(reservoir_labels) != reservoir.n_frames:
         raise ValueError(f"{len(reservoir_labels)} reservoir labels for "
                          f"{reservoir.n_frames} frames.")
+    if manifest.get("rest2"):
+        _, res_d = _rest2_deltas(run_dir, manifest, reservoir)
+        return coverage_check(top_labels, reservoir_labels, res_d, 1.0, 0.0,
+                              n_states, reservoir_weights=_run_weights(
+                                  run_dir, reservoir), min_visits=min_visits)
     res_h = _reservoir_enthalpy(run_dir, manifest)
     if res_h is None:
         return {"status": "no_energies"}
@@ -427,9 +475,15 @@ def format_summary(summary: dict[str, Any]) -> str:
             implied = check["reservoir_temperature_implied_K"]
             like = (f"{implied:.0f} K" if implied is not None
                     else "no finite temperature")
-            lines.append(
-                f"  reservoir temperature check: {verdict} (z = "
-                f"{check['z']:+.1f}; its energies look like {like})")
+            if check.get("rest2"):
+                lines.append(
+                    f"  reservoir ensemble check: {verdict} (z = "
+                    f"{check['z']:+.1f}, in the reduced-energy difference "
+                    "between the top state and the reservoir)")
+            else:
+                lines.append(
+                    f"  reservoir temperature check: {verdict} (z = "
+                    f"{check['z']:+.1f}; its energies look like {like})")
         elif check is not None:
             why = {"too_few_frames": "too few frames to test",
                    "no_overlap": "the top replica and the reservoir share "

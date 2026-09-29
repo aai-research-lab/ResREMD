@@ -108,6 +108,11 @@ class TemperatureReweighting:
     (by default every state with a trajectory) in that stretch; those
     frames are a mixture of the states, and the weights are normalised over
     that mixture.
+
+    A REST2 run is reweighted the same way, with the reduced energy of a
+    sample at state k being beta0 U(s_k), known at every scale from the
+    run's `rest2_terms.csv`; temperatures are then the solute's effective
+    ones. The PV term is the same at every REST2 state and drops out.
     """
 
     def __init__(self, run_dir: str | Path) -> None:
@@ -123,6 +128,14 @@ class TemperatureReweighting:
         self.betas = np.array([beta(t) for t in self.temperatures])
         table = _table(self.run_dir / "states.csv")
         self.state_of = table[:, 2:].astype(int)
+        self.rest2 = manifest.get("rest2")
+        if self.rest2:
+            n = self.state_of.shape[1]
+            terms = _table(self.run_dir / "rest2_terms.csv")[:, 2:]
+            #: Per cycle and replica, A, B, C of U(s).
+            self.h = terms.reshape(len(terms), n, 3)
+            self.beta0 = beta(self.rest2["run_temperature_K"])
+            self.scales = np.asarray(self.rest2["scales"], dtype=float)
         h = _table(self.run_dir / "energies.csv")[:, 2:]
         ensemble = Ensemble.from_dict(manifest["system"]["ensemble"])
         if ensemble.constant_pressure:
@@ -131,7 +144,8 @@ class TemperatureReweighting:
                 if (self.run_dir / "areas.csv").exists() \
                 else np.zeros_like(vol)
             h = ensemble.enthalpy(h, vol, area)
-        self.h = h
+        if not self.rest2:
+            self.h = h
         every = settings["trajectory_interval_steps"] // \
             settings["exchange_interval_steps"]
         self.every = every
@@ -146,12 +160,37 @@ class TemperatureReweighting:
         """Frames in each state's trajectory."""
         return len(self.saved_rows)
 
+    def _reduced(self, x: np.ndarray, targets: np.ndarray | None = None
+                 ) -> np.ndarray:
+        """Reduced energies (states or targets, samples) of samples ``x``:
+        enthalpies, or REST2 terms. ``targets`` are temperatures (K)."""
+        if self.rest2:
+            from .rest2 import energy
+
+            s = self.scales if targets is None else \
+                np.sqrt(self.rest2["run_temperature_K"] / np.asarray(targets))
+            return self.beta0 * energy(x[None, :, :], s[:, None])
+        b = self.betas if targets is None else \
+            np.array([beta(t) for t in targets])
+        return b[:, None] * x[None, :]
+
     def free_energies(self, first_row: int = 0, last_row: int | None = None
                       ) -> np.ndarray:
         rows = slice(first_row, last_row)
-        pooled_h = self.h[rows].ravel()
         pooled_k = self.state_of[rows].ravel()
         n_k = np.bincount(pooled_k, minlength=len(self.betas))
+        if self.rest2:
+            x = self.h[rows].reshape(-1, 3)
+            s = self.scales
+            # First guess by the trapezoidal rule on d f / d s
+            # = beta0 <2 A s + B>.
+            g = np.array([self.beta0 * np.mean(2 * x[pooled_k == k, 0] * s[k]
+                                               + x[pooled_k == k, 1])
+                          for k in range(len(s))])
+            guess = np.concatenate([[0.0], np.cumsum(
+                np.diff(s) * 0.5 * (g[1:] + g[:-1]))])
+            return solve(self._reduced(x), n_k, initial=guess)
+        pooled_h = self.h[rows].ravel()
         b = self.betas
         # First guess by the trapezoidal rule on d f / d beta = <h>.
         mean_h = np.array([pooled_h[pooled_k == k].mean()
@@ -185,9 +224,8 @@ class TemperatureReweighting:
             for k in states])
         counts = np.zeros(len(self.betas))
         counts[states] = len(rows)
-        b = self.betas
-        w = weights(b[:, None] * fh[None, :], counts, f_k,
-                    beta(temperature_K) * fh)
+        w = weights(self._reduced(fh), counts, f_k,
+                    self._reduced(fh, np.array([temperature_K]))[0])
         per_state = np.split(w, len(states))
         return {
             "temperature_K": float(temperature_K),

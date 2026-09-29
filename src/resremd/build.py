@@ -65,9 +65,26 @@ def generate(prepared: Prepared | str | Path | None = None, *,
     prep = _prepared(prepared, system, topology, positions, box, o)
     t = o["temperature_K"]
     dt = o["timestep_fs"]
+    # With REST2 scaling the simulation runs at the real temperature t_sim
+    # and the solute at the effective temperature t, the reservoir's.
+    base_system = prep.system
+    rest2_meta = None
+    t_sim = t
+    if o["rest2_run_temperature_K"] is not None:
+        from .rest2 import rest2_system, scale_of, solute_digest
+        from .system import select_atoms
+
+        t_sim = float(o["rest2_run_temperature_K"])
+        solute = select_atoms(prep.topology, o["rest2_selection"],
+                              o["rest2_atoms"])
+        base_system, info = rest2_system(prep.system, solute)
+        rest2_meta = {"scale": scale_of(t_sim, t),
+                      "simulation_temperature_K": t_sim,
+                      "solute_sha256": solute_digest(solute),
+                      "solute_atoms": info["solute_atoms"]}
     sim_system, ensemble = simulated_system(
-        prep.system, ensemble=o["ensemble"], pressure_bar=o["pressure_bar"],
-        temperature_K=t, frequency=o["barostat_frequency"])
+        base_system, ensemble=o["ensemble"], pressure_bar=o["pressure_bar"],
+        temperature_K=t_sim, frequency=o["barostat_frequency"])
     biases = o["bias_torsions"] or None
     bias_group = None
     if biases:
@@ -93,6 +110,7 @@ def generate(prepared: Prepared | str | Path | None = None, *,
                 or meta["source"].get("frame_interval_steps") != interval \
                 or meta["source"].get("timestep_fs") != dt \
                 or meta["temperature_K"] != t \
+                or meta.get("rest2") != rest2_meta \
                 or meta["source"].get("bias_torsions") != biases \
                 or not _same_convergence(meta["source"].get("convergence"),
                                          _convergence_source(o, watch)):
@@ -152,10 +170,13 @@ def generate(prepared: Prepared | str | Path | None = None, *,
                     "convergence": _convergence_source(o, watch),
                     "friction_per_ps": o["friction_per_ps"],
                     "seed": int(seed)})
+        if rest2_meta is not None:
+            meta["rest2"] = rest2_meta
         write_json(meta_file, meta)
     session_start = time.time()
     rng = np.random.default_rng([int(seed), 2, done])
-    integrator = make_integrator(o["integrator"], t, o["friction_per_ps"], dt,
+    integrator = make_integrator(o["integrator"], t_sim, o["friction_per_ps"],
+                                 dt,
                                  int(rng.integers(1, 2**31 - 1)))
     context, platform = create_context(
         sim_system, integrator, platform=o["platform"],
@@ -167,7 +188,11 @@ def generate(prepared: Prepared | str | Path | None = None, *,
         # A barostat that came with the System was made for some other
         # temperature. Left there, it would accept volume moves as if at that
         # temperature, and the frames would not be a sample at this one.
-        context.setParameter(ensemble.temperature_parameter, t)
+        context.setParameter(ensemble.temperature_parameter, t_sim)
+    if rest2_meta is not None:
+        from .rest2 import set_scale
+
+        set_scale(context, rest2_meta["scale"])
     periodic = prep.periodic
 
     def set_box(b):
@@ -204,10 +229,10 @@ def generate(prepared: Prepared | str | Path | None = None, *,
         if o["minimize"]:
             logger.info("Minimising")
             openmm.LocalEnergyMinimizer.minimize(context)
-        context.setVelocitiesToTemperature(t * unit.kelvin,
+        context.setVelocitiesToTemperature(t_sim * unit.kelvin,
                                            int(rng.integers(1, 2**31 - 1)))
         eq_left = int(round(o["equilibration_ns"] * 1e6 / dt))
-        logger.info("Equilibrating at %g K (%d steps)", t, eq_left)
+        logger.info("Equilibrating at %g K (%d steps)", t_sim, eq_left)
 
     per_checkpoint = max(1, int(round(500.0 / (interval * dt / 1000.0))))
     t0 = time.time()
@@ -244,7 +269,7 @@ def generate(prepared: Prepared | str | Path | None = None, *,
                 energy -= v_bias  # recorded unbiased, as the run will see it
             if not np.isfinite(energy):
                 raise ReservoirError(
-                    f"The simulation at {t:g} K blew up at frame {k}.",
+                    f"The simulation at {t_sim:g} K blew up at frame {k}.",
                     code="resremd.simulation.unstable")
             writer.write(k, pos, b)
             potential[k] = energy
@@ -264,10 +289,10 @@ def generate(prepared: Prepared | str | Path | None = None, *,
                     angles.flush()
                     tv = halves_tv(angles[:done], o["convergence_bins"],
                                    None if bias_energy is None else
-                                   bias_weights(bias_energy[:done], t))
+                                   bias_weights(bias_energy[:done], t_sim))
                     moves = basin_transitions(
                         angles[:done], weights=None if bias_energy is None
-                        else bias_weights(bias_energy[:done], t))
+                        else bias_weights(bias_energy[:done], t_sim))
                     history.append([done, tv, int(min(moves))])
                     logger.info("halves of the watched torsions differ by "
                                 "TV %.3f; fewest transitions %d", tv,
@@ -325,7 +350,7 @@ def generate(prepared: Prepared | str | Path | None = None, *,
         moves = basin_transitions(
             np.load(out / "build_torsions_deg.npy"),
             weights=None if bias_energy is None
-            else bias_weights(np.asarray(bias_energy), t))
+            else bias_weights(np.asarray(bias_energy), t_sim))
         done_ok = _converged(history, o["convergence_tv"],
                              o["convergence_min_transitions"])
         meta["convergence"] = {
@@ -357,7 +382,7 @@ def generate(prepared: Prepared | str | Path | None = None, *,
                 "slow conformational change; treat as an upper bound.",
     }
     if bias_energy is not None:
-        weights = bias_weights(np.asarray(bias_energy), t)
+        weights = bias_weights(np.asarray(bias_energy), t_sim)
         np.save(out / "weights.npy", weights)
         kish = float(1.0 / np.sum(weights ** 2))
         meta["statistics"]["effective_frames_kish"] = kish

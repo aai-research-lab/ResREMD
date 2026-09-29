@@ -211,8 +211,26 @@ class Reservoir:
 
     @property
     def beta(self) -> float:
-        """0 for a non-Boltzmann reservoir, the infinite-temperature limit."""
-        return 0.0 if self.kind == "non_boltzmann" else beta(self.temperature_K)
+        """1/kT of the simulation the frames are a sample of: 0 for a
+        non-Boltzmann reservoir, the infinite-temperature limit, and the real
+        temperature for a REST2 reservoir, whose `temperature_K` is the
+        solute's effective one."""
+        if self.kind == "non_boltzmann":
+            return 0.0
+        if self.rest2:
+            return beta(float(self.rest2["simulation_temperature_K"]))
+        return beta(self.temperature_K)
+
+    @property
+    def rest2(self) -> dict[str, Any] | None:
+        """For a reservoir sampled with REST2 scaling: the scale, the real
+        temperature and the solute atoms' digest."""
+        return self.meta.get("rest2")
+
+    @property
+    def scale(self) -> float:
+        """The REST2 scale s its frames were sampled at (1: unscaled)."""
+        return float(self.rest2["scale"]) if self.rest2 else 1.0
 
     @property
     def ensemble(self) -> Ensemble:
@@ -307,18 +325,23 @@ class Reservoir:
         return self._digest
 
     def energies(self, evaluate: Callable[[np.ndarray, np.ndarray | None],
-                                          float],
+                                          Any],
                  *, key_fields: dict[str, Any],
-                 progress: Callable[[str], None] | None = None
-                 ) -> dict[str, np.ndarray]:
+                 progress: Callable[[str], None] | None = None,
+                 terms: bool = False) -> dict[str, np.ndarray]:
         """Potential energy, volume and area of every frame.
 
         ``evaluate(positions, box)`` returns the potential energy in kJ/mol
         of one frame. ``key_fields`` names what the energies depend on
         besides the frames (System digest, platform, precision, OpenMM
         version); together with the frames' own digest it keys the cache.
+        With ``terms``, ``evaluate`` returns REST2's A, B, C for a frame,
+        kept as ``rest2_terms`` with ``potential_kjmol`` their sum (s = 1).
         """
-        fields = {"frames_sha256": self.content_digest(), **key_fields}
+        fields = {"frames_sha256": self.content_digest(), **key_fields,
+                  "terms": bool(terms)}
+        names = ("potential_kjmol", "volume_nm3", "area_nm2") + \
+            (("rest2_terms",) if terms else ())
         key = hashlib.sha256(json.dumps(fields, sort_keys=True).encode()
                              ).hexdigest()
         cache_dir = self.path / "energies"
@@ -328,8 +351,7 @@ class Reservoir:
                 with np.load(cache) as data:
                     if str(data["key"]) == key:
                         logger.info("Reservoir energies read from %s", cache)
-                        return {k: np.array(data[k]) for k in
-                                ("potential_kjmol", "volume_nm3", "area_nm2")}
+                        return {k: np.array(data[k]) for k in names}
             except Exception as exc:  # a damaged cache is recomputed
                 logger.warning("Ignoring unreadable energy cache %s: %s",
                                cache, exc)
@@ -337,11 +359,16 @@ class Reservoir:
         u = np.empty(n)
         v = np.zeros(n)
         a = np.zeros(n)
+        abc = np.zeros((n, 3)) if terms else None
         t0 = time.time()
         step = max(1, n // 10)
         for k in range(n):
             pos, box = self.frame(k)
-            u[k] = evaluate(pos, box)
+            if terms:
+                abc[k] = evaluate(pos, box)
+                u[k] = abc[k].sum()
+            else:
+                u[k] = evaluate(pos, box)
             v[k], a[k] = box_volume_and_area(box)
             if progress and (k + 1) % step == 0:
                 progress(f"reservoir energies {k + 1}/{n} "
@@ -353,6 +380,8 @@ class Reservoir:
                 "System. They cannot come from its ensemble.",
                 code="resremd.reservoir.energy")
         result = {"potential_kjmol": u, "volume_nm3": v, "area_nm2": a}
+        if terms:
+            result["rest2_terms"] = abc
         try:
             cache_dir.mkdir(exist_ok=True)
             # A name of its own, so runs sharing a reservoir do not write

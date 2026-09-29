@@ -102,6 +102,11 @@ class PilotAcceptance:
         from .mbar import TemperatureReweighting
 
         rw = TemperatureReweighting(run_dir)
+        if rw.rest2:
+            raise InputError(
+                "Tuning a REST2 ladder from a pilot is not supported yet; "
+                "its acceptance depends on the solute's energy alone.",
+                code="resremd.input.ladder")
         n = rw.h.shape[0]
         # Every state's energy at a cycle is one sample. Consecutive cycles
         # are correlated, so thinning to max_samples loses little.

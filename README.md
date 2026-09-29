@@ -114,6 +114,38 @@ reservoir holds, judged from the potential energy. Slow conformational
 change decorrelates more slowly than the energy, so treat that number as an
 upper bound, and not as proof that the reservoir is converged.
 
+### REST2, with or without a reservoir
+
+`rest2: true` replaces the temperature ladder with replica exchange with
+solute tempering (REST2; Wang, Friesner and Berne 2011). Every replica runs
+at the lowest temperature, and the rest of the ladder becomes the solute's
+effective temperatures, reached by scaling the solute's interactions:
+solute-solute nonbonded terms and torsions by T0/T_k, solute-solvent terms
+by its square root. Only the solute's energy has to overlap between
+neighbours, so far fewer replicas span a range in explicit solvent. The
+solute is `rest2_selection` (by default everything but water and ions) or
+`rest2_atoms`.
+
+```
+resremd run --prepared setup --rest2 --temperature-min-K 300 \
+    --temperature-max-K 600 --n-replicas 6 --duration-ns 50 --output rest2
+```
+
+Each replica's energy is exactly quadratic in the scale, so three energy
+evaluations per cycle give it at every state; exchanges, MBAR across the
+states (`TemperatureReweighting`) and reservoir exchanges all use that. A
+reservoir can be coupled to the top state as before. It can be one sampled
+at a real temperature, as for temperature REMD, or one generated with the
+same REST2 scaling (`resremd reservoir generate --rest2-run-temperature-K
+300 --temperature-K 600`, the solute at 600 K and everything else at 300 K).
+The exchange is the general independence move
+
+    log alpha = [u_top(x) - u_R(x)] - [u_top(y) - u_R(y)],
+
+with u the reduced potential of the top state and of the reservoir, which
+for temperature REMD is the criterion above. REST2 needs a NonbondedForce:
+explicit solvent or vacuum, not implicit-solvent GB.
+
 ### What is checked before a run starts
 
 - The reservoir holds the system's atoms in the same order (by a digest of

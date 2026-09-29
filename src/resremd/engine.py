@@ -55,6 +55,8 @@ class Segment:
     potential_kjmol: float
     box: np.ndarray | None
     frame: np.ndarray | None = None
+    #: REST2 only: A, B, C of U(s) = A s^2 + B s + C for the configuration.
+    terms: tuple[float, float, float] | None = None
 
 
 @dataclass
@@ -68,6 +70,9 @@ class Slot:
     replicas: list[int] = field(default_factory=list)
     resident: int | None = None
     temperature: float | None = None
+    #: REST2 scale the context's parameters are set to (None: no REST2).
+    scale: float | None = None
+    rest2: bool = False
 
     @property
     def exclusive(self) -> bool:
@@ -84,6 +89,31 @@ class Slot:
             self.context.setParameter(self.ensemble.temperature_parameter,
                                       temperature_K)
         self.temperature = temperature_K
+
+    def set_scale(self, s: float | None) -> None:
+        if not self.rest2 or s is None or self.scale == s:
+            return
+        from .rest2 import set_scale
+
+        set_scale(self.context, s)
+        self.scale = s
+
+    def _energy_now(self) -> float:
+        return _kj(self.context.getState(getEnergy=True).getPotentialEnergy())
+
+    def terms(self, own: float, own_energy: float) -> tuple[float, float,
+                                                            float]:
+        """A, B, C of the configuration in the context, from its energy at
+        its own scale and at two others; the scale is restored."""
+        from .rest2 import fit, probes
+
+        scales, energies = [own], [own_energy]
+        for p in probes(own):
+            self.set_scale(p)
+            scales.append(p)
+            energies.append(self._energy_now())
+        self.set_scale(own)
+        return fit(scales, energies)
 
     def _set_box(self, box: np.ndarray | None) -> None:
         if self.periodic and box is not None:
@@ -118,15 +148,24 @@ class Slot:
         self.context.computeVirtualSites()
 
     def energy(self, positions: np.ndarray, box: np.ndarray | None) -> float:
-        """Potential energy of a frame as injected. Leaves the slot empty."""
+        """Potential energy of a frame as injected (at s = 1 with REST2).
+        Leaves the slot empty."""
         self.inject(positions, box)
         self.resident = None
-        return _kj(self.context.getState(getEnergy=True).getPotentialEnergy())
+        self.set_scale(1.0)
+        return self._energy_now()
+
+    def frame_terms(self, positions: np.ndarray, box: np.ndarray | None
+                    ) -> tuple[float, float, float]:
+        """REST2 A, B, C of a frame as injected. Leaves the slot empty."""
+        e1 = self.energy(positions, box)
+        return self.terms(1.0, e1)
 
     # -- dynamics -----------------------------------------------------------
     def run(self, replica: Replica, temperature_K: float, steps: int, *,
-            want_frame: bool) -> Segment:
+            want_frame: bool, scale: float | None = None) -> Segment:
         ctx = self.context
+        self.set_scale(scale)
         if replica.reset is not None:
             positions, box, seed = replica.reset
             self.inject(positions, box)
@@ -169,7 +208,8 @@ class Slot:
             framed = ctx.getState(getPositions=True,
                                   enforcePeriodicBox=self.periodic)
             frame = _nm(framed.getPositions(asNumpy=True))
-        return Segment(energy, box, frame)
+        terms = self.terms(scale, energy) if self.rest2 else None
+        return Segment(energy, box, frame, terms)
 
 
 def _nm(quantity: Any) -> np.ndarray:
@@ -192,8 +232,10 @@ class Engine:
                  integrator: str, timestep_fs: float, friction_per_ps: float,
                  temperature_K: float, platform: str, precision: str,
                  devices: list[int] | None, contexts_per_device: int | None,
-                 cpu_threads: int | None, seeds: np.random.Generator) -> None:
+                 cpu_threads: int | None, seeds: np.random.Generator,
+                 rest2: bool = False) -> None:
         self.periodic = bool(system.usesPeriodicBoundaryConditions())
+        self.rest2 = rest2
         self.slots: list[Slot] = []
         device_list = list(devices) if devices else [None]
 
@@ -205,7 +247,8 @@ class Engine:
             ctx, used = create_context(system, integ, platform=platform_name,
                                        precision=precision, device=device,
                                        cpu_threads=threads)
-            return Slot(ctx, integ, used, device, ensemble, self.periodic)
+            return Slot(ctx, integ, used, device, ensemble, self.periodic,
+                        rest2=rest2)
 
         first = new_slot(platform, device_list[0], cpu_threads)
         self.platform = first.platform
@@ -249,11 +292,14 @@ class Engine:
         }
 
     def run(self, replicas: list[Replica], temperatures: list[float],
-            steps: int, want_frame: set[int]) -> dict[int, Segment]:
-        """Advance every replica by ``steps`` at its temperature."""
+            steps: int, want_frame: set[int],
+            scales: list[float] | None = None) -> dict[int, Segment]:
+        """Advance every replica by ``steps`` at its temperature (and, with
+        REST2, its scale)."""
         def work(slot: Slot) -> dict[int, Segment]:
             return {r: slot.run(replicas[r], temperatures[r], steps,
-                                want_frame=r in want_frame)
+                                want_frame=r in want_frame,
+                                scale=None if scales is None else scales[r])
                     for r in slot.replicas}
 
         results: dict[int, Segment] = {}
@@ -275,6 +321,10 @@ class Engine:
         """A function giving the potential energy of coordinates, on slot 0."""
         return self.slots[0].energy
 
+    def terms_evaluator(self):
+        """A function giving the REST2 A, B, C of coordinates, on slot 0."""
+        return self.slots[0].frame_terms
+
     def minimize(self, positions: np.ndarray, box: np.ndarray | None, *,
                  tolerance_kjmol_nm: float = 10.0, max_iterations: int = 0
                  ) -> np.ndarray:
@@ -282,6 +332,7 @@ class Engine:
 
         slot = self.slots[0]
         slot._set_box(box)
+        slot.set_scale(1.0)
         slot.context.setPositions(positions)
         openmm.LocalEnergyMinimizer.minimize(slot.context, tolerance_kjmol_nm,
                                              max_iterations)

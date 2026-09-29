@@ -266,6 +266,37 @@ TRAJECTORY_INTERVAL = Option(
     "sampled. Left out, every 10 exchange cycles.",
     group="Output", minimum=1)
 
+REST2 = Option(
+    "rest2", bool, False,
+    "Replica exchange with solute tempering (REST2) instead of temperature "
+    "replica exchange. Every replica runs at the lowest temperature of the "
+    "ladder; the others become the solute's effective temperatures, reached "
+    "by scaling the solute's interactions (Wang, Friesner and Berne 2011). "
+    "Far fewer replicas span a range in explicit solvent, since only the "
+    "solute's energy grows with the system. Needs a NonbondedForce "
+    "(explicit solvent or vacuum, not implicit-solvent GB).",
+    group="Temperatures")
+
+REST2_SELECTION = Option(
+    "rest2_selection", str, "solute",
+    "The atoms REST2 heats: `solute` (neither water nor monatomic ions), "
+    "`not water`, or `all`.",
+    group="Temperatures", choices=("all", "not water", "solute"))
+
+REST2_ATOMS = Option(
+    "rest2_atoms", list, None,
+    "Atom indices REST2 heats, overriding `rest2_selection`: part of a "
+    "protein, a ligand, a loop.",
+    group="Temperatures", items=int)
+
+GENERATE_REST2_T0 = Option(
+    "rest2_run_temperature_K", float, None,
+    "Generate the reservoir with REST2 scaling: simulate at this real "
+    "temperature with the solute (`rest2_selection` or `rest2_atoms`) at the "
+    "effective temperature `temperature_K`. The reservoir then serves a "
+    "REST2 run whose lowest temperature this is.",
+    group="Reservoir", minimum=0.0, minimum_exclusive=True)
+
 SAVE_SELECTION = Option(
     "save_selection", str, "not water",
     "Atoms written to the trajectories: `all`, `not water`, or `solute` "
@@ -443,11 +474,12 @@ SURFACE_TENSION = Option(
 
 RUN = Schema(
     name="run",
-    description="Temperature replica exchange, coupled to a reservoir when "
-                "one is given.",
+    description="Temperature replica exchange, or REST2, coupled to a "
+                "reservoir when one is given.",
     options=(
         PREPARED, OUTPUT_RUN, RESUME,
         TEMPERATURES, TEMPERATURE_MIN, TEMPERATURE_MAX, N_REPLICAS,
+        REST2, REST2_SELECTION, REST2_ATOMS,
         RESERVOIR, RESERVOIR_INTERVAL, RESERVOIR_REWEIGHT,
         EXCHANGE_INTERVAL,
         DURATION, PRODUCTION_STEPS, EQUILIBRATION, MINIMIZE,
@@ -466,6 +498,7 @@ GENERATE = Schema(
     options=(
         PREPARED, OUTPUT_RESERVOIR, RESUME,
         RESERVOIR_TEMPERATURE, FRAME_INTERVAL, BIAS_TORSIONS,
+        GENERATE_REST2_T0, REST2_SELECTION, REST2_ATOMS,
         RESERVOIR_DURATION, RESERVOIR_EQUILIBRATION, CONVERGENCE_TORSIONS,
         CONVERGENCE_TV, CONVERGENCE_BINS, CONVERGENCE_MIN_TRANSITIONS,
         MINIMIZE,
