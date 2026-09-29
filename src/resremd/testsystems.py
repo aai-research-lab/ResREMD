@@ -133,45 +133,71 @@ def alanine_dipeptide(phi: float = -80.0, psi: float = 150.0):
     the Amber14 templates, and the structure is energy-minimised in vacuum.
     Returns the topology and positions in nm.
     """
+    return _capped("ALA", phi=phi, psi=psi, omega=180.0)
+
+
+def proline_dipeptide(omega: float = 180.0, psi: float = 150.0):
+    """Ac-Pro-NMe (ACE-PRO-NME), the model for prolyl cis/trans isomerism.
+
+    ``omega`` is the ACE-PRO peptide bond (CH3-C-N-CA): 180 trans, 0 cis.
+    Its barrier, about 80 kJ/mol, is crossed on the order of minutes at room
+    temperature, so heating alone does not sample it.
+    """
+    return _capped("PRO", phi=-65.0, psi=psi, omega=omega)
+
+
+def _capped(resname: str, *, phi: float, psi: float, omega: float):
     import openmm
     from openmm import app, unit
 
+    r = resname
     x: dict[str, np.ndarray] = {}
     x["ACE:CH3"] = np.zeros(3)
     x["ACE:C"] = np.array([0.152, 0.0, 0.0])
-    x["ALA:N"] = _place(np.array([0.0, 0.1, 0.0]), x["ACE:CH3"], x["ACE:C"],
-                        0.133, 116.0, 180.0)
-    x["ALA:CA"] = _place(x["ACE:CH3"], x["ACE:C"], x["ALA:N"],
-                         0.146, 122.0, 180.0)
-    x["ALA:C"] = _place(x["ACE:C"], x["ALA:N"], x["ALA:CA"],
-                        0.152, 111.0, phi)
-    x["NME:N"] = _place(x["ALA:N"], x["ALA:CA"], x["ALA:C"],
+    x[f"{r}:N"] = _place(np.array([0.0, 0.1, 0.0]), x["ACE:CH3"],
+                         x["ACE:C"], 0.133, 116.0, 180.0)
+    x[f"{r}:CA"] = _place(x["ACE:CH3"], x["ACE:C"], x[f"{r}:N"],
+                          0.146, 122.0, omega)
+    x[f"{r}:C"] = _place(x["ACE:C"], x[f"{r}:N"], x[f"{r}:CA"],
+                         0.152, 111.0, phi)
+    x["NME:N"] = _place(x[f"{r}:N"], x[f"{r}:CA"], x[f"{r}:C"],
                         0.133, 116.0, psi)
-    x["NME:C"] = _place(x["ALA:CA"], x["ALA:C"], x["NME:N"],
+    x["NME:C"] = _place(x[f"{r}:CA"], x[f"{r}:C"], x["NME:N"],
                         0.146, 122.0, 180.0)
-    x["ACE:O"] = _place(x["ALA:CA"], x["ALA:N"], x["ACE:C"], 0.123, 123.0, 0.0)
-    x["ALA:O"] = _place(x["NME:C"], x["NME:N"], x["ALA:C"], 0.123, 123.0, 0.0)
+    # Carbonyl oxygens lie opposite the atom before them across the C=O
+    # carbon, so they sit at omega + 180 from the next C-alpha.
+    x["ACE:O"] = _place(x[f"{r}:CA"], x[f"{r}:N"], x["ACE:C"], 0.123, 123.0,
+                        omega + 180.0)
+    x[f"{r}:O"] = _place(x["NME:C"], x["NME:N"], x[f"{r}:C"], 0.123, 123.0,
+                         0.0)
     # The CB position that makes CA an L centre: seen with the hydrogen
     # towards the viewer, CO -> R -> N runs clockwise.
-    ca = x["ALA:CA"]
+    ca = x[f"{r}:CA"]
     for sign in (1.0, -1.0):
-        cb = _place(x["ALA:C"], x["ALA:N"], ca, 0.153, 110.0, sign * 122.0)
+        cb = _place(x[f"{r}:C"], x[f"{r}:N"], ca, 0.153, 110.0, sign * 122.0)
         units = [(p - ca) / np.linalg.norm(p - ca)
-                 for p in (x["ALA:N"], x["ALA:C"], cb)]
-        if np.dot(np.cross(x["ALA:C"] - ca, cb - ca), -sum(units)) < 0:
-            x["ALA:CB"] = cb
+                 for p in (x[f"{r}:N"], x[f"{r}:C"], cb)]
+        if np.dot(np.cross(x[f"{r}:C"] - ca, cb - ca), -sum(units)) < 0:
+            x[f"{r}:CB"] = cb
             break
+    side = ("CB",)
+    if r == "PRO":
+        # Close the pyrrolidine ring back onto N; minimisation settles it.
+        x["PRO:CG"] = _place(x["PRO:N"], ca, x["PRO:CB"], 0.150, 104.5, 30.0)
+        x["PRO:CD"] = _place(ca, x["PRO:CB"], x["PRO:CG"], 0.150, 105.5,
+                             -35.0)
+        side = ("CB", "CG", "CD")
     top = app.Topology()
     chain = top.addChain()
     positions = []
-    for resname, names in (("ACE", ("CH3", "C", "O")),
-                           ("ALA", ("N", "CA", "C", "O", "CB")),
-                           ("NME", ("N", "C"))):
-        residue = top.addResidue(resname, chain)
+    for res, names in (("ACE", ("CH3", "C", "O")),
+                       (r, ("N", "CA", "C", "O") + side),
+                       ("NME", ("N", "C"))):
+        residue = top.addResidue(res, chain)
         for name in names:
             top.addAtom(name, app.element.Element.getBySymbol(name[0]),
                         residue)
-            positions.append(x[f"{resname}:{name}"])
+            positions.append(x[f"{res}:{name}"])
     top.createStandardBonds()
     forcefield = app.ForceField("amber14-all.xml")
     modeller = app.Modeller(top, np.array(positions) * unit.nanometer)
@@ -184,6 +210,22 @@ def alanine_dipeptide(phi: float = -80.0, psi: float = 150.0):
     openmm.LocalEnergyMinimizer.minimize(context)
     pos = context.getState(getPositions=True).getPositions(asNumpy=True)
     return modeller.topology, np.asarray(pos.value_in_unit(unit.nanometer))
+
+
+def omega_atoms(topology) -> list[int]:
+    """Atom indices of the first peptide bond's omega: CH3/CA, C, N, CA."""
+    res = list(topology.residues())
+    first, second = res[0], res[1]
+
+    def idx(residue, name):
+        for a in residue.atoms():
+            if a.name == name:
+                return a.index
+        raise ValueError(f"No atom {name} in {residue.name}.")
+
+    lead = "CH3" if first.name == "ACE" else "CA"
+    return [idx(first, lead), idx(first, "C"), idx(second, "N"),
+            idx(second, "CA")]
 
 
 def prepare_peptide(topology, positions, *, solvent: str = "implicit",

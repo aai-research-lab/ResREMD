@@ -24,3 +24,19 @@ def test_prepare_peptide_implicit():
     assert system.getNumConstraints() > 0, "bonds to hydrogen constrained"
     with pytest.raises(ValueError):
         testsystems.prepare_peptide(top, pos, solvent="vacuum")
+
+
+def test_proline_dipeptide_trans_and_cis():
+    md = pytest.importorskip("mdtraj")
+    for omega in (180.0, 0.0):
+        top, pos = testsystems.proline_dipeptide(omega)
+        t = md.Trajectory(pos[None], md.Topology.from_openmm(top))
+        w = np.degrees(md.compute_dihedrals(
+            t, [testsystems.omega_atoms(top)]))[0, 0]
+        assert abs(((w - omega) + 180) % 360 - 180) < 15
+        idx = {a.name: a.index for a in t.topology.atoms
+               if a.residue.name == "PRO"}
+        assert np.linalg.norm(pos[idx["CD"]] - pos[idx["N"]]) < 0.16
+        zeta = np.degrees(md.compute_dihedrals(
+            t, [[idx["CA"], idx["N"], idx["C"], idx["CB"]]]))[0, 0]
+        assert 25 < zeta < 45
