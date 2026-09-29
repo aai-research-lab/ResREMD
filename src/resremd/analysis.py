@@ -172,6 +172,74 @@ def ensemble_check(top_h, reservoir_h, beta_top: float, beta_reservoir: float,
     }
 
 
+def coverage_check(top_labels, reservoir_labels, reservoir_h,
+                   beta_top: float, beta_reservoir: float, n_states: int,
+                   *, reservoir_weights=None, min_visits: int = 5
+                   ) -> dict[str, Any]:
+    """Does the reservoir hold every state the top replica reaches?
+
+    The top replica's state populations are compared with the reservoir's,
+    reweighted from its temperature to the top one by
+    exp(-(beta_top - beta_R) h). A correct reservoir gives the same numbers
+    within error. A state the top replica visits and the reservoir never
+    holds is reported as ``unsupported`` whatever the error bars say: that
+    is the flaw that biases every temperature and that the temperature
+    check cannot see.
+
+    Labels are state indices from any classification the caller trusts.
+    The check can only see states the top replica reaches on its own; a
+    state reachable neither by the ladder nor by the reservoir stays
+    invisible to it, as to every method.
+    """
+    from .statistics import statistical_inefficiency
+
+    top = np.asarray(top_labels, dtype=int)
+    lab = np.asarray(reservoir_labels, dtype=int)
+    h = np.asarray(reservoir_h, dtype=float)
+    w0 = np.ones_like(h) if reservoir_weights is None \
+        else np.asarray(reservoir_weights, dtype=float)
+    if top.size == 0 or lab.size == 0:
+        return {"status": "too_few_frames"}
+    x = np.log(np.maximum(w0, 1e-300)) - (beta_top - beta_reservoir) * h
+    w = np.exp(x - x.max())
+    w /= w.sum()
+    n_eff = float(1.0 / np.sum(w * w))
+    p_top = np.bincount(top, minlength=n_states)[:n_states] / top.size
+    p_res = np.bincount(lab, weights=w, minlength=n_states)[:n_states]
+    visits = np.bincount(top, minlength=n_states)[:n_states]
+    # A frame of zero weight (underflowed, or weighted out) holds nothing.
+    held = np.bincount(lab[(w0 > 0) & (w > 0)],
+                       minlength=n_states)[:n_states]
+    z = np.zeros(n_states)
+    for k in range(n_states):
+        hit = (top == k).astype(float)
+        g_t = statistical_inefficiency(hit)
+        # The reservoir's is a ratio estimate with weights that depend on
+        # the state; its variance is sum w_i^2 (1_i - p)^2 (delta method),
+        # times the inefficiency of the terms themselves.
+        terms = w * ((lab == k) - p_res[k])
+        g_r = statistical_inefficiency(terms * lab.size)
+        var = (p_top[k] * (1 - p_top[k]) * g_t / top.size
+               + g_r * float(np.sum(terms ** 2)))
+        diff = p_top[k] - p_res[k]
+        if var > 0:
+            z[k] = diff / np.sqrt(var)
+        elif abs(diff) > 1e-12:
+            # Both sides certain and different: as far apart as can be.
+            z[k] = np.copysign(np.inf, diff)
+    unsupported = [int(k) for k in range(n_states)
+                   if held[k] == 0 and visits[k] >= min_visits]
+    return {
+        "status": "ok",
+        "top_populations": p_top.tolist(),
+        "reservoir_populations_at_top": p_res.tolist(),
+        "z": z.tolist(),
+        "max_abs_z": float(np.max(np.abs(z))),
+        "unsupported_states": unsupported,
+        "reservoir_effective_frames": n_eff,
+    }
+
+
 def _reservoir_enthalpy(run_dir: Path, manifest: dict[str, Any]
                         ) -> np.ndarray | None:
     saved = run_dir / "reservoir_enthalpy_kjmol.npy"
@@ -225,6 +293,36 @@ def reservoir_check(run_dir: str | Path) -> dict[str, Any] | None:
     t_top = manifest["states"][top]["temperature_K"]
     return ensemble_check(top_h, res_h, beta(t_top), reservoir.beta,
                           reservoir_weights=reservoir.weights)
+
+
+def reservoir_coverage(run_dir: str | Path, top_labels, reservoir_labels,
+                       n_states: int, *, min_visits: int = 5
+                       ) -> dict[str, Any] | None:
+    """:func:`coverage_check` between a run's top replica and its reservoir.
+
+    ``top_labels`` are the states of the frames saved at the top
+    temperature, in order; ``reservoir_labels`` those of the reservoir's
+    frames, in the reservoir's order. The classification is the caller's.
+    """
+    from .reservoir import Reservoir
+    from .thermo import beta
+
+    run_dir = Path(run_dir)
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    if manifest.get("reservoir") is None:
+        return None
+    reservoir = Reservoir.open(manifest["reservoir"]["path"])
+    if len(reservoir_labels) != reservoir.n_frames:
+        raise ValueError(f"{len(reservoir_labels)} reservoir labels for "
+                         f"{reservoir.n_frames} frames.")
+    res_h = _reservoir_enthalpy(run_dir, manifest)
+    if res_h is None:
+        return {"status": "no_energies"}
+    t_top = manifest["states"][-1]["temperature_K"]
+    return coverage_check(top_labels, reservoir_labels, res_h, beta(t_top),
+                          reservoir.beta, n_states,
+                          reservoir_weights=reservoir.weights,
+                          min_visits=min_visits)
 
 
 def summarize(run_dir: str | Path) -> dict[str, Any]:

@@ -231,12 +231,18 @@ pytest -m slow         # longer statistical runs
 - **Cost.** MD steps and wall time per phase, summed over sessions, in the
   manifest (and a reservoir's own cost in its `reservoir.json`).
 
-A reservoir that never converged at its own temperature also passes the
-temperature check. The benchmark harness catches that separately, by
-comparing the reservoir's two halves. A reservoir with a state entirely
-missing passes both; only an independent reference exposes it, which is
-why a reservoir must come from a simulation long enough to have visited
-everything that matters at its temperature.
+Two flaws pass the temperature check. A reservoir that never converged at
+its own temperature is caught by comparing its two halves, as the benchmark
+harness does. A reservoir with a state missing is caught by the coverage
+check, `resremd.reservoir_coverage(run, top_labels, reservoir_labels,
+n_states)`, given state labels from any classification you trust: the top
+replica's populations are compared with the reservoir's reweighted to the
+top temperature, and a state the top replica visits but the reservoir never
+holds is reported as unsupported. It sees only states the top replica reaches
+by its own dynamics. A state that neither the ladder nor the reservoir
+reaches stays invisible, which is why a reservoir must come from a
+simulation long enough, or biased enough, to have visited everything that
+matters at its temperature.
 
 ## Benchmarks
 

@@ -18,7 +18,7 @@ try:
 except ImportError:  # an uninstalled checkout
     __version__ = "0.0.0"
 
-from .analysis import format_summary, summarize
+from .analysis import format_summary, reservoir_coverage, summarize
 from .build import generate as generate_reservoir
 from .build import import_trajectories as import_reservoir
 from .errors import ResRemdError
@@ -28,6 +28,7 @@ from .sampler import run
 
 __all__ = [
     "__version__", "run", "generate_reservoir", "import_reservoir",
-    "Reservoir", "summarize", "format_summary", "ResRemdError",
+    "Reservoir", "summarize", "format_summary", "reservoir_coverage",
+    "ResRemdError",
     "RUN", "GENERATE", "IMPORT",
 ]
