@@ -123,3 +123,69 @@ def test_a_build_killed_before_its_first_checkpoint_starts_over(tmp_path):
             testsystems.double_well(), output=str(out), temperature_K=520.0,
             duration_ns=0.004, frame_interval_steps=100,
             equilibration_ns=0.0, platform="Reference", random_seed=2)
+
+
+def _cis_estimate(path):
+    r = Reservoir.open(path)
+    top = md.load_topology(str(path / "topology.pdb"))
+    phi = md.compute_dihedrals(md.Trajectory(np.array(r.positions), top),
+                               [[0, 1, 2, 3]])[:, 0]
+    cis = (np.abs(phi) < np.pi / 2).astype(float)
+    w = r.weights if r.weights is not None else np.full(len(cis),
+                                                         1 / len(cis))
+    blocks = np.array_split(np.arange(len(cis)), 10)
+    means = [(w[b] * cis[b]).sum() / w[b].sum() for b in blocks]
+    return float((w * cis).sum()), float(np.std(means, ddof=1) / np.sqrt(10))
+
+
+def test_a_bias_crosses_the_barrier_and_the_weights_remove_it(tmp_path):
+    common = dict(temperature_K=520.0, duration_ns=6.0,
+                  frame_interval_steps=100, equilibration_ns=0.01,
+                  friction_per_ps=5.0, platform="Reference", random_seed=1)
+    meta = resremd.generate_reservoir(
+        testsystems.torsion_model(), output=str(tmp_path / "biased"),
+        bias_torsions=testsystems.torsion_bias(70.0), **common)
+    assert meta["kind"] == "weighted"
+    assert meta["source"]["bias_torsions"][0]["parameters"] == {"k": 70.0}
+    assert meta["statistics"]["effective_frames_kish"] > 1000
+    est, se = _cis_estimate(tmp_path / "biased")
+    exact = testsystems.cis_fraction(520.0)
+    assert abs(est - exact) < max(4 * se, 0.01), (est, se, exact)
+    # Without the bias the barrier is never crossed at all.
+    resremd.generate_reservoir(testsystems.torsion_model(),
+                               output=str(tmp_path / "plain"), **common)
+    assert _cis_estimate(tmp_path / "plain")[0] == 0.0
+
+
+def test_biased_build_energies_are_unbiased(tmp_path):
+    import openmm
+
+    resremd.generate_reservoir(
+        testsystems.torsion_model(), output=str(tmp_path / "r"),
+        temperature_K=520.0, duration_ns=0.02, frame_interval_steps=100,
+        equilibration_ns=0.0, platform="Reference", random_seed=1,
+        bias_torsions=testsystems.torsion_bias(70.0))
+    built = np.load(tmp_path / "r/build_potential_kjmol.npy")
+    bias = np.load(tmp_path / "r/build_bias_kjmol.npy")
+    assert np.all(bias <= 0)
+    p = testsystems.torsion_model()
+    ctx = openmm.Context(p.system, openmm.VerletIntegrator(0.001),
+                         openmm.Platform.getPlatformByName("Reference"))
+    res = Reservoir.open(tmp_path / "r")
+    for k in (0, res.n_frames - 1):
+        ctx.setPositions(res.frame(k)[0])
+        u = ctx.getState(getEnergy=True).getPotentialEnergy()._value
+        assert u == pytest.approx(built[k], abs=1e-3)
+
+
+@pytest.mark.parametrize("bias,match", [
+    ([{"atoms": [0, 1, 2], "energy": "theta"}], "four distinct"),
+    ([{"atoms": [0, 1, 2, 3], "energy": "k*"}], "not valid"),
+    ([{"atoms": [0, 1, 2, 3], "energy": "theta", "extra": 1}], "mapping"),
+])
+def test_bad_biases_are_refused(tmp_path, bias, match):
+    with pytest.raises(InputError, match=match):
+        resremd.generate_reservoir(
+            testsystems.torsion_model(), output=str(tmp_path / "r"),
+            temperature_K=520.0, duration_ns=0.02, frame_interval_steps=100,
+            platform="Reference", bias_torsions=bias)

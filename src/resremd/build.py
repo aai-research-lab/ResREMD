@@ -68,6 +68,12 @@ def generate(prepared: Prepared | str | Path | None = None, *,
     sim_system, ensemble = simulated_system(
         prep.system, ensemble=o["ensemble"], pressure_bar=o["pressure_bar"],
         temperature_K=t, frequency=o["barostat_frequency"])
+    biases = o["bias_torsions"] or None
+    bias_group = None
+    if biases:
+        sim_system, bias_group = add_torsion_biases(
+            sim_system, biases, prep.n_atoms)
+    kind = "weighted" if biases else "boltzmann"
     interval = o["frame_interval_steps"]
     n_frames = int(round(o["duration_ns"] * 1e6 / dt)) // interval
     if n_frames < 1:
@@ -82,10 +88,12 @@ def generate(prepared: Prepared | str | Path | None = None, *,
             raise ResumeError(f"There is no unfinished build in {out}.",
                               code="resremd.resume.missing")
         meta = json.loads(meta_file.read_text())
-        if meta["n_frames"] != n_frames or meta["temperature_K"] != t:
+        if meta["n_frames"] != n_frames or meta["temperature_K"] != t \
+                or meta["source"].get("bias_torsions") != biases:
             raise ResumeError(
                 "The build in progress was started with a different "
-                "temperature or length.", code="resremd.resume.mismatch")
+                "temperature, length or bias.",
+                code="resremd.resume.mismatch")
         with np.load(chk_file) as data:
             saved = json.loads(str(data["meta"]))
             start_pos = np.array(data["positions"])
@@ -118,7 +126,7 @@ def generate(prepared: Prepared | str | Path | None = None, *,
         wall_before = 0.0
         eq_steps = 0
         meta = base_metadata(
-            kind="boltzmann", temperature_K=t, ensemble=ensemble,
+            kind=kind, temperature_K=t, ensemble=ensemble,
             n_frames=n_frames, n_atoms=prep.n_atoms, periodic=prep.periodic,
             topology_sha256=topology_digest(prep.topology),
             source={"method": "simulated at the reservoir temperature",
@@ -128,6 +136,7 @@ def generate(prepared: Prepared | str | Path | None = None, *,
                     "frame_interval_steps": interval,
                     "equilibration_ns": o["equilibration_ns"],
                     "integrator": o["integrator"], "timestep_fs": dt,
+                    "bias_torsions": biases,
                     "friction_per_ps": o["friction_per_ps"],
                     "seed": int(seed)})
         write_json(meta_file, meta)
@@ -160,6 +169,11 @@ def generate(prepared: Prepared | str | Path | None = None, *,
     potential = open_memmap(out / "build_potential_kjmol.npy",
                             mode="r+" if o["resume"] else "w+",
                             dtype=np.float64, shape=(n_frames,))
+    bias_energy = None
+    if biases:
+        bias_energy = open_memmap(out / "build_bias_kjmol.npy",
+                                  mode="r+" if o["resume"] else "w+",
+                                  dtype=np.float64, shape=(n_frames,))
     if o["resume"]:
         set_box(start_box)
         context.setPositions(start_pos)
@@ -204,6 +218,12 @@ def generate(prepared: Prepared | str | Path | None = None, *,
             b = (np.asarray(state.getPeriodicBoxVectors(asNumpy=True)._value)
                  if periodic else None)
             energy = float(state.getPotentialEnergy()._value)
+            if bias_energy is not None:
+                v_bias = float(context.getState(
+                    getEnergy=True, groups={bias_group})
+                    .getPotentialEnergy()._value)
+                bias_energy[k] = v_bias
+                energy -= v_bias  # recorded unbiased, as the run will see it
             if not np.isfinite(energy):
                 raise ReservoirError(
                     f"The simulation at {t:g} K blew up at frame {k}.",
@@ -214,6 +234,8 @@ def generate(prepared: Prepared | str | Path | None = None, *,
             if done % per_checkpoint == 0 or done == n_frames or stop.requested:
                 writer.flush()
                 potential.flush()
+                if bias_energy is not None:
+                    bias_energy.flush()
                 _save_build_checkpoint(
                     chk_file, context, done, seed, periodic,
                     wall_seconds=wall_before + time.time() - session_start,
@@ -242,6 +264,18 @@ def generate(prepared: Prepared | str | Path | None = None, *,
         "note": "From the potential energy, which decorrelates faster than "
                 "slow conformational change; treat as an upper bound.",
     }
+    if bias_energy is not None:
+        weights = bias_weights(np.asarray(bias_energy), t)
+        np.save(out / "weights.npy", weights)
+        kish = float(1.0 / np.sum(weights ** 2))
+        meta["statistics"]["effective_frames_kish"] = kish
+        # Correlation and uneven weights compound.
+        meta["statistics"]["effective_independent_frames"] = kish / g
+        if kish < 0.05 * n_frames:
+            logger.warning(
+                "The bias leaves %.0f effective frames of %d: its weights "
+                "are dominated by a few frames. A weaker bias, or a longer "
+                "run, gives a more useful reservoir.", kish, n_frames)
     first = np.array(writer.positions[0], dtype=float)
     write_topology(out / "topology.pdb", prep.topology, first,
                    None if writer.box is None else np.array(writer.box[0]))
@@ -261,7 +295,60 @@ def generate(prepared: Prepared | str | Path | None = None, *,
 
 
 _BUILD_FILES = ("reservoir.json", "positions.npy", "box.npy",
-                "build_potential_kjmol.npy")
+                "build_potential_kjmol.npy", "build_bias_kjmol.npy",
+                "weights.npy")
+
+
+def add_torsion_biases(system: Any, biases: list[dict[str, Any]],
+                       n_atoms: int) -> tuple[Any, int]:
+    """A copy of the System with the bias torsions in a force group of
+    their own, so their energy can be read apart from the rest."""
+    import openmm
+
+    used = {f.getForceGroup() for f in system.getForces()}
+    free = [g for g in range(31, -1, -1) if g not in used]
+    if not free:
+        raise InputError("Every force group is taken; the bias needs one.",
+                         code="resremd.input.bias")
+    group = free[0]
+    system = openmm.XmlSerializer.deserialize(
+        openmm.XmlSerializer.serialize(system))
+    for i, b in enumerate(biases):
+        if not isinstance(b, dict) or set(b) - {"atoms", "energy",
+                                                "parameters"}:
+            raise InputError(
+                f"Bias {i}: a mapping with `atoms`, `energy` and, "
+                "optionally, `parameters`.", code="resremd.input.bias")
+        atoms = [int(a) for a in b.get("atoms", [])]
+        if len(atoms) != 4 or min(atoms) < 0 or max(atoms) >= n_atoms \
+                or len(set(atoms)) != 4:
+            raise InputError(f"Bias {i}: `atoms` must be four distinct atom "
+                             f"indices below {n_atoms}.",
+                             code="resremd.input.bias")
+        params = dict(b.get("parameters") or {})
+        force = openmm.CustomTorsionForce(str(b["energy"]))
+        for name in params:
+            force.addPerTorsionParameter(str(name))
+        force.addTorsion(*atoms, [float(v) for v in params.values()])
+        force.setForceGroup(group)
+        system.addForce(force)
+    try:  # an expression OpenMM cannot parse is reported here, not later
+        openmm.Context(system, openmm.VerletIntegrator(0.001),
+                       openmm.Platform.getPlatformByName("Reference"))
+    except Exception as exc:
+        raise InputError(f"The bias expression is not valid: {exc}",
+                         code="resremd.input.bias") from exc
+    return system, group
+
+
+def bias_weights(bias_kjmol: np.ndarray, temperature_K: float) -> np.ndarray:
+    """exp(beta V_bias), normalised: frames sampled under U + V_bias,
+    weighted to be a sample under U."""
+    from .thermo import beta
+
+    x = beta(temperature_K) * np.asarray(bias_kjmol, dtype=float)
+    w = np.exp(x - x.max())
+    return w / w.sum()
 
 
 def _clear_unfinished_build(out: Path) -> None:

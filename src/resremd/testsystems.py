@@ -257,6 +257,80 @@ def prepare_peptide(topology, positions, *, solvent: str = "implicit",
     return system, modeller.topology, positions, box
 
 
+#: A four-atom torsion with a cis/trans barrier far too high to cross by
+#: heating: V(phi) = (A/2)(1 - cos 2 phi) + (B/2)(1 + cos phi), with cis at
+#: phi = 0 raised by B above trans at phi = pi.
+TORSION_BARRIER = 80.0
+TORSION_TILT = 6.0
+_BOND_NM, _BOND_K = 0.15, 5.0e4
+_ANGLE_RAD, _ANGLE_K = 1.9, 400.0
+
+
+def torsion_energy(phi):
+    return (TORSION_BARRIER / 2) * (1 - np.cos(2 * phi)) \
+        + (TORSION_TILT / 2) * (1 + np.cos(phi))
+
+
+def torsion_model(cis: bool = False):
+    """Four atoms whose dihedral has a prolyl-like 80 kJ/mol barrier.
+
+    The dihedral's equilibrium distribution is exactly proportional to
+    exp(-V(phi)/kT): in internal coordinates its Jacobian is constant, and
+    nothing else in the model depends on it. Bond and angle terms are
+    harmonic, with no nonbonded interactions.
+    """
+    import openmm
+    from openmm import app
+
+    system = openmm.System()
+    for _ in range(4):
+        system.addParticle(12.0)
+    bonds = openmm.HarmonicBondForce()
+    for i in range(3):
+        bonds.addBond(i, i + 1, _BOND_NM, _BOND_K)
+    angles = openmm.HarmonicAngleForce()
+    for i in range(2):
+        angles.addAngle(i, i + 1, i + 2, _ANGLE_RAD, _ANGLE_K)
+    torsion = openmm.CustomTorsionForce(
+        f"{TORSION_BARRIER / 2}*(1-cos(2*theta))"
+        f"+{TORSION_TILT / 2}*(1+cos(theta))")
+    torsion.addTorsion(0, 1, 2, 3, [])
+    for f in (bonds, angles, torsion):
+        system.addForce(f)
+    topology = app.Topology()
+    residue = topology.addResidue("TOR", topology.addChain())
+    atoms = [topology.addAtom(f"C{i}", app.element.carbon, residue)
+             for i in range(4)]
+    for i in range(3):
+        topology.addBond(atoms[i], atoms[i + 1])
+    positions = np.zeros((4, 3))
+    positions[1] = [0.0, 0.0, 0.0]
+    positions[0] = [_BOND_NM * np.sin(_ANGLE_RAD), _BOND_NM *
+                    np.cos(_ANGLE_RAD), 0.0]
+    positions[2] = [0.0, _BOND_NM, 0.0]
+    positions[3] = _place(positions[0], positions[1], positions[2], _BOND_NM,
+                          np.degrees(_ANGLE_RAD), 0.0 if cis else 180.0)
+    return from_objects(system, topology, positions)
+
+
+def torsion_grid() -> np.ndarray:
+    return np.linspace(-np.pi, np.pi, 20001)
+
+
+def cis_fraction(temperature_K: float) -> float:
+    """Exact probability that |phi| < pi/2."""
+    phi = torsion_grid()
+    p = np.exp(-(torsion_energy(phi) - torsion_energy(phi).min())
+               / (BOLTZ * temperature_K))
+    return float(p[np.abs(phi) < np.pi / 2].sum() / p.sum())
+
+
+def torsion_bias(k: float = 70.0) -> list[dict]:
+    """A bias that lowers the model's barrier by k: -k sin(phi)^2."""
+    return [{"atoms": [0, 1, 2, 3], "energy": "-k*sin(theta)^2",
+             "parameters": {"k": float(k)}}]
+
+
 def lj_box(n_side: int = 5, spacing: float = 0.5, pressure: bool = False):
     """A small periodic Lennard-Jones fluid, for constant-pressure checks."""
     import openmm

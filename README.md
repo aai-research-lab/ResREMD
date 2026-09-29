@@ -96,8 +96,17 @@ membrane under surface tension) at constant pressure.
 | kind | frames are | β_R | notes |
 |---|---|---|---|
 | `boltzmann` | an equilibrium sample at `temperature_K` | 1/kT_R | the usual choice |
-| `weighted` | any sampling, with weights making it Boltzmann at `temperature_K` | 1/kT_R | e.g. umbrella sampling reweighted with MBAR |
+| `weighted` | any sampling, with weights making it Boltzmann at `temperature_K` | 1/kT_R | from `generate` with `bias_torsions`, or imported, e.g. umbrella sampling reweighted with MBAR |
 | `non_boltzmann` | structures of equal weight covering configuration space | 0 | Roitberg et al. 2007; constant volume only |
+
+Some barriers are too high for temperature to cross in any affordable
+time: prolyl cis/trans isomerisation is the common one in peptides. A
+reservoir can still carry both sides. `resremd reservoir generate` with
+`bias_torsions` simulates under a known bias on chosen torsions (for example
+`-k*sin(theta)^2`, which lowers a peptide bond's barrier by k) and
+reweights every frame by exp(V_bias/kT_R), so the reservoir is a weighted
+sample of the unbiased system. The build reports the Kish effective number
+of frames, which falls as the bias grows.
 
 A replica exchange run coupled to a reservoir is exactly as correct as the
 reservoir. The build reports how many effectively independent frames the

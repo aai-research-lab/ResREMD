@@ -311,6 +311,20 @@ RESERVOIR_EQUILIBRATION = Option(
     "Dynamics at the reservoir temperature before frames are kept.",
     group="Run length", minimum=0.0)
 
+BIAS_TORSIONS = Option(
+    "bias_torsions", list, None,
+    "Static biases on torsions, to cross barriers that temperature alone "
+    "does not. Each is a mapping: `atoms`, four atom indices; `energy`, an "
+    "OpenMM expression in `theta` (radians) in kJ/mol; `parameters`, values "
+    "for the other names in it. The frames are then reweighted by "
+    "exp(V_bias / kT), which makes them a Boltzmann sample of the unbiased "
+    "system at `temperature_K`, and the reservoir is written as weighted. "
+    "To flatten a peptide bond's cis/trans barrier: energy `-k*sin(theta)^2` "
+    "with k a little below the barrier height.",
+    group="Reservoir", items=dict,
+    example=[{"atoms": [4, 6, 8, 10], "energy": "-k*sin(theta)^2",
+              "parameters": {"k": 60.0}}])
+
 TRAJECTORIES = Option(
     "trajectories", list, None,
     "Trajectory files to read frames from (any format MDTraj reads), in "
@@ -372,11 +386,11 @@ RUN = Schema(
 
 GENERATE = Schema(
     name="reservoir generate",
-    description="Build a Boltzmann reservoir by simulating at one high "
-                "temperature.",
+    description="Build a reservoir by simulating at one high temperature, "
+                "optionally under a known bias that is then reweighted away.",
     options=(
         PREPARED, OUTPUT_RESERVOIR, RESUME,
-        RESERVOIR_TEMPERATURE, FRAME_INTERVAL,
+        RESERVOIR_TEMPERATURE, FRAME_INTERVAL, BIAS_TORSIONS,
         RESERVOIR_DURATION, RESERVOIR_EQUILIBRATION, MINIMIZE,
         INTEGRATOR, TIMESTEP, FRICTION, ENSEMBLE, PRESSURE,
         BAROSTAT_FREQUENCY, RANDOM_SEED,
