@@ -99,6 +99,11 @@ threshold for the rest of the run.
 - Medians and 95 percent intervals are bootstrapped over seeds, and every
   seed's value is listed when there are six or fewer.
 
+**With every temperature (MBAR).** With `analysis: {mbar: true}`, the
+populations are also estimated from the frames of every temperature,
+weighted to the lowest by MBAR over the run's energies, for the same
+stretches of the run. The shipped specs save every temperature for this.
+
 **Agreement between starts.** The TV distance between the same seed's runs
 from opposite starts. It needs no reference.
 - Caveat: agreement shows the starts were forgotten, not that the answer is

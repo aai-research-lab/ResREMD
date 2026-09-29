@@ -13,7 +13,7 @@ run:
   trajectory_interval_steps: 5000
   equilibration_ns: 1.0
   save_selection: solute
-  save_states: lowest
+  save_states: all                 # every temperature, for MBAR
   platform: auto
 methods:
   - name: remd
@@ -22,4 +22,4 @@ methods:
       generate: {temperature_K: 470.0, duration_ns: 500,
                  frame_interval_steps: 5000, equilibration_ns: 5.0}
 reference: {kind: file, path: chignolin_implicit_reference.json}
-analysis: {threshold_tv: 0.03, threshold_jsd: 0.03}
+analysis: {threshold_tv: 0.03, threshold_jsd: 0.03, mbar: true}

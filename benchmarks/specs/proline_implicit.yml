@@ -25,4 +25,4 @@ methods:
                  bias_torsions: [{atoms: omega, energy: "-k*sin(theta)^2",
                                   parameters: {k: 60.0}}]}
 reference: {kind: file, path: proline_implicit_reference.json}
-analysis: {threshold_tv: 0.02, threshold_jsd: 0.02}
+analysis: {threshold_tv: 0.02, threshold_jsd: 0.02, mbar: true}

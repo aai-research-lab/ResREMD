@@ -14,7 +14,7 @@ run:
   trajectory_interval_steps: 500
   equilibration_ns: 0.2
   save_selection: solute
-  save_states: lowest
+  save_states: all                 # every temperature, for MBAR
   platform: auto
 methods:
   - name: remd
@@ -25,4 +25,4 @@ methods:
                  bias_torsions: [{atoms: omega, energy: "-k*sin(theta)^2",
                                   parameters: {k: 60.0}}]}
 reference: {kind: file, path: proline_explicit_reference.json}
-analysis: {threshold_tv: 0.02, threshold_jsd: 0.02}
+analysis: {threshold_tv: 0.02, threshold_jsd: 0.02, mbar: true}

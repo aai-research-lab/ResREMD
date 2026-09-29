@@ -24,6 +24,10 @@ when there are six seeds or fewer.
 run's reservoir. With equal cost planned, every method's runs have the same
 total and are compared at the same budget.
 
+**MBAR** (`analysis: {mbar: true}`): the same populations estimated from
+the frames of every temperature, weighted to the lowest by MBAR over the
+run's energies, for the same stretches. Columns ending in `_mbar`.
+
 **Agreement** is the TV distance between a seed's runs from opposite
 starts. Their reservoirs are separate, so they are independent.
 
@@ -72,15 +76,15 @@ def _read_lowest(run: Path, system: systems.BenchSystem, prepared: Path
     return features, system.labels_from_features(features), manifest
 
 
-def _read_top(run: Path, system: systems.BenchSystem, prepared: Path,
-              manifest: dict[str, Any]) -> np.ndarray | None:
-    """State labels of the frames saved at the top temperature, if any."""
+def _read_state(run: Path, system: systems.BenchSystem, prepared: Path,
+                manifest: dict[str, Any], state: int) -> np.ndarray | None:
+    """State labels of the frames saved at one temperature, if any."""
     import mdtraj as md
 
-    top = manifest["states"][-1]
-    if not top.get("trajectory"):
+    entry = manifest["states"][state]
+    if not entry.get("trajectory"):
         return None
-    traj = md.load(str(run / top["trajectory"]),
+    traj = md.load(str(run / entry["trajectory"]),
                    top=str(run / "topology.pdb"))
     return system.labels_from_features(system.features(traj, prepared))
 
@@ -358,6 +362,13 @@ def analyze(out: Path) -> dict[str, Any]:
             d["features"][int(disc * g):g]), ref.get("histogram"))
             for g in grid])
         excess = jsd - np.array([floor(g - int(disc * g)) for g in grid])
+        tv_mbar = np.full(len(grid), np.nan)
+        if a["mbar"]:
+            pm = _mbar_populations(d, system, out, start, grid, disc,
+                                   spec["temperatures_K"][0])
+            if pm is not None:
+                tv_mbar = np.array([total_variation(p, ref["populations"])
+                                    for p in pm])
         time_ns = grid * interval * dt_fs / 1e6
         cost = res_steps + eq_steps + grid * interval * n_rep
         curves[key] = {"time_ns": time_ns, "pops": pops}
@@ -367,12 +378,15 @@ def analyze(out: Path) -> dict[str, Any]:
                 "frames": int(g), "time_ns": time_ns[i],
                 "cost_md_steps": cost[i], "tv_error": tv[i],
                 "jsd_bits": jsd[i], "jsd_excess_bits": excess[i],
+                "tv_error_mbar": tv_mbar[i],
                 **{f"pop_{s}": pops[i, j]
                    for j, s in enumerate(system.states)},
             })
         t_tv = convergence_time(time_ns, tv, a["threshold_tv"])
         t_js = convergence_time(time_ns, excess, a["threshold_jsd"]) \
             if np.isfinite(excess).any() else None
+        t_mbar = convergence_time(time_ns, tv_mbar, a["threshold_tv"]) \
+            if np.isfinite(tv_mbar).any() else None
 
         def cost_at(t, res=res_steps, eq=eq_steps, dt=dt_fs, nr=n_rep):
             return None if t is None else float(res + eq + t * 1e6 / dt * nr)
@@ -386,6 +400,8 @@ def analyze(out: Path) -> dict[str, Any]:
             "converged_tv_ns": t_tv, "converged_tv_cost": cost_at(t_tv),
             "converged_jsd_ns": t_js, "converged_jsd_cost": cost_at(t_js),
             "final_tv_error": tv[-1], "final_jsd_excess_bits": excess[-1],
+            "converged_tv_mbar_cost": cost_at(t_mbar),
+            "final_tv_error_mbar": tv_mbar[-1],
             "reservoir_md_steps": res_steps,
             "equilibration_md_steps": eq_steps,
             "wall_seconds": sum(man["cost"]["wall_seconds"].values())
@@ -433,6 +449,7 @@ def analyze(out: Path) -> dict[str, Any]:
         },
         "thresholds": {"tv": a["threshold_tv"],
                        "jsd_excess": a["threshold_jsd"]},
+        "mbar": bool(a["mbar"]),
         "missing_runs": missing,
         "methods": {m["name"]: _method_summary(spec, m, conv_rows, agree_rows,
                                                res_rows, system)
@@ -444,13 +461,49 @@ def analyze(out: Path) -> dict[str, Any]:
     return summary
 
 
+def _mbar_populations(d, system, out, start, grid, disc, temperature_K
+                      ) -> np.ndarray | None:
+    """Populations at the lowest temperature from every saved temperature,
+    by MBAR, for the same stretches as the lowest-temperature estimates."""
+    from resremd.mbar import TemperatureReweighting
+
+    rw = TemperatureReweighting(d["run"])
+    if len(rw.saved_states) < 2:
+        logger.warning("%s saved one temperature; no MBAR estimate.",
+                       d["run"])
+        return None
+    k = len(system.states)
+    labels = {}
+    for state in rw.saved_states:
+        lab = _read_state(d["run"], system, jobmod.prepared_dir(out, start),
+                          d["manifest"], state)
+        if len(lab) != rw.n_frames:
+            raise ValueError(f"{d['run']}: state {state} has {len(lab)} "
+                             f"frames, the tables {rw.n_frames}.")
+        labels[state] = lab
+    pops = []
+    for g in grid:
+        first = min(int(disc * g), int(g) - 1)
+        try:
+            w = rw.weights(temperature_K, frames=(first, int(g)))
+        except RuntimeError:            # too little overlap yet
+            pops.append(np.full(k, np.nan))
+            continue
+        p = np.zeros(k)
+        for state, ws in w["weights"].items():
+            p += np.bincount(labels[state][first:int(g)], weights=ws,
+                             minlength=k)[:k]
+        pops.append(p)
+    return np.array(pops)
+
+
 def _coverage(spec, out, system, frames, m, start, seed, d
               ) -> dict[str, Any]:
     """The coverage check for one run, or {} when it cannot be made."""
     if not m.get("reservoir"):
         return {}
-    top = _read_top(d["run"], system, jobmod.prepared_dir(out, start),
-                    d["manifest"])
+    top = _read_state(d["run"], system, jobmod.prepared_dir(out, start),
+                      d["manifest"], -1)
     if top is None:
         logger.warning("%s saved no top-temperature trajectory; no coverage "
                        "check.", d["run"])
@@ -525,6 +578,12 @@ def _method_summary(spec, m, conv_rows, agree_rows, res_rows, system):
             "final_tv_error_mean": float(np.mean(
                 [r["final_tv_error"] for r in rs])),
         }
+        if spec["analysis"]["mbar"]:
+            per_start[start]["converged_tv_mbar_cost_md_steps"] = \
+                _median_block([r["converged_tv_mbar_cost"] for r in rs],
+                              limit_cost)
+            per_start[start]["final_tv_error_mbar_mean"] = _mean_or_none(
+                [r["final_tv_error_mbar"] for r in rs])
     # Both starts: per seed, the later convergence (None if either failed).
     both = []
     for seed in spec["seeds"]:
@@ -802,6 +861,22 @@ def format_summary(summary: dict[str, Any]) -> str:
                 f"{ci:>38}{ftv:>10}"
                 + (f"{acc:>9}{z:>8}{halves:>8}{cover:>8}" if i == 0
                    else ""))
+    if summary.get("mbar"):
+        lines += ["", "With every temperature, by MBAR:",
+                  f"{'method':<20}{'start':<11}"
+                  f"{'cost to converge, 1e6 steps (95% CI)':>38}"
+                  f"{'final TV':>10}"]
+        for name, m in summary["methods"].items():
+            for i, (start, s) in enumerate(m["starts"].items()):
+                c = s.get("converged_tv_mbar_cost_md_steps")
+                if c is None:
+                    continue
+                ci = (f"{show(c['median'], 1e6)} ({show(c['low'], 1e6)}-"
+                      f"{show(c['high'], 1e6)})")
+                ftv = "" if s.get("final_tv_error_mbar_mean") is None \
+                    else f"{s['final_tv_error_mbar_mean']:.3f}"
+                lines.append(f"{name if i == 0 else '':<20}{start:<11}"
+                             f"{ci:>38}{ftv:>10}")
     lines += ["", "max|z|: reservoir temperature check; halves: TV between "
               "the reservoir's halves; cover: coverage check, max |z| over "
               "states ('!': a state missing from the reservoir)"]

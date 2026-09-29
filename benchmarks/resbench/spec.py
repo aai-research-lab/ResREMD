@@ -56,7 +56,7 @@ DEFAULTS: dict[str, Any] = {
                   "path": None},
     "analysis": {"threshold_tv": 0.05, "threshold_jsd": 0.02,
                  "points": 40, "discard_fraction": 0.0,
-                 "amortize_shared_reservoir": False},
+                 "amortize_shared_reservoir": False, "mbar": False},
     "slurm": {"partition": None, "gres": "gpu:1", "time": None,
               "cpus_per_task": 4, "account": None, "setup": [],
               "extra": []},
@@ -95,6 +95,11 @@ def check(raw: dict[str, Any]) -> dict[str, Any]:
     spec = copy.deepcopy(raw)
     for key, default in DEFAULTS.items():
         if isinstance(default, dict):
+            unknown = set(spec.get(key) or {}) - set(default)
+            if unknown:
+                raise SpecError(f"Unknown `{key}` keys: "
+                                f"{', '.join(sorted(unknown))}. Known: "
+                                f"{', '.join(sorted(default))}.")
             spec[key] = {**default, **(spec.get(key) or {})}
         elif key not in spec:
             spec[key] = default

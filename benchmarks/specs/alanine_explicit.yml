@@ -15,7 +15,7 @@ run:
   trajectory_interval_steps: 500
   equilibration_ns: 0.2
   save_selection: solute
-  save_states: lowest
+  save_states: all                 # every temperature, for MBAR
   platform: auto
 methods:
   - name: remd
@@ -27,4 +27,4 @@ methods:
 # reference. Cheaper than separate reference runs; check the precision
 # warning in the analysis.
 reference: {kind: pooled, methods: [remd, resremd]}
-analysis: {threshold_tv: 0.02, threshold_jsd: 0.02}
+analysis: {threshold_tv: 0.02, threshold_jsd: 0.02, mbar: true}

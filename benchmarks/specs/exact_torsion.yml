@@ -40,5 +40,5 @@ methods:
                  bias_torsions: [{atoms: phi, energy: "-k*sin(theta)^2",
                                   parameters: {k: 80.0}}]}
 reference: {kind: exact}
-analysis: {threshold_tv: 0.02, threshold_jsd: 0.01, points: 40}
+analysis: {threshold_tv: 0.02, threshold_jsd: 0.01, points: 40, mbar: true}
 slurm: {gres: null, cpus_per_task: 1}

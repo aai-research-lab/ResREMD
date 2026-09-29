@@ -24,6 +24,10 @@ def test_every_shipped_spec_is_valid():
     ({"methods": [{"name": "a"}, {"name": "a"}]}, "used twice"),
     ({"methods": [{"name": "a", "reservoir": {}}]}, "either"),
     ({"reference": {"kind": "psychic"}}, "reference.kind"),
+    ({"analysis": {"threshold_tvd": 0.1}}, "Unknown `analysis` keys"),
+    ({"methods": [{"name": "a"}, {"name": "b", "runs": False, "reservoir": {
+        "exact": {"temperature_K": 500, "n_frames": 10}}}],
+      "reference": {"kind": "pooled", "methods": ["b"]}}, "makes none"),
     ({"reference": {"kind": "pooled"}}, "names the methods"),
     ({"seeds": [1, 1]}, "distinct"),
     ({"methods": [{"name": "a", "reservoir": {"exact": {
@@ -56,8 +60,10 @@ def test_smoke_end_to_end(tmp_path):
     assert max(plans.values()) - min(plans.values()) <= 3 * 250, \
         "equal cost within one exchange interval over the replicas"
     exact = summary["methods"]["resremd_exact"]
+    assert summary["mbar"]
     for start in ("right", "left"):
         assert exact["starts"][start]["final_tv_error_mean"] < 0.05
+        assert exact["starts"][start]["final_tv_error_mbar_mean"] < 0.05
         assert len(exact["starts"][start]["converged_tv_ns"]["values"]) == 2
     assert exact["reservoir_check_z_max_abs"] < 4
     assert exact["coverage_z_max_abs"] < 4

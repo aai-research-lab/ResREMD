@@ -23,5 +23,5 @@ methods:
                  frame_interval_steps: 250, equilibration_ns: 0.01,
                  friction_per_ps: 5.0, platform: Reference}
 reference: {kind: exact}
-analysis: {threshold_tv: 0.05, points: 20}
+analysis: {threshold_tv: 0.05, points: 20, mbar: true}
 slurm: {gres: null}

@@ -32,4 +32,4 @@ methods:
 # The reference comes from independent long runs (alanine_implicit_reference
 # .yml): resbench reference bench_ala_ref alanine_implicit_reference.json
 reference: {kind: file, path: alanine_implicit_reference.json}
-analysis: {threshold_tv: 0.02, threshold_jsd: 0.02}
+analysis: {threshold_tv: 0.02, threshold_jsd: 0.02, mbar: true}
