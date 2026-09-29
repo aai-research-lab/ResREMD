@@ -60,6 +60,8 @@ def test_smoke_end_to_end(tmp_path):
         assert exact["starts"][start]["final_tv_error_mean"] < 0.05
         assert len(exact["starts"][start]["converged_tv_ns"]["values"]) == 2
     assert exact["reservoir_check_z_max_abs"] < 4
+    assert exact["coverage_z_max_abs"] < 4
+    assert not exact["coverage_unsupported_states"]
     # Each run has its own reservoir, made from its own start.
     assert (out / "reservoirs/resremd_generated/left/seed_1/reservoir.json"
             ).exists()
@@ -91,3 +93,52 @@ def test_changed_settings_are_not_reused(tmp_path):
     (out / "spec.yml").write_text(text)
     with pytest.raises(RuntimeError, match="different settings"):
         jobs.run_job(out, "run/remd/right/1")
+
+
+TORSION_SPEC = """
+name: torsion_test
+system: {name: torsion_model}
+temperatures_K: [300.0, 400.0]
+seeds: [1, 2]
+run: {production_steps: 50000, exchange_interval_steps: 250,
+      trajectory_interval_steps: 250, equilibration_ns: 0.0,
+      minimize: false, save_selection: all, platform: Reference}
+methods:
+  - name: remd
+  - name: at_300
+    runs: false
+    reservoir:
+      generate: {temperature_K: 300.0, duration_ns: 8.0,
+                 frame_interval_steps: 1000, equilibration_ns: 0.01,
+                 platform: Reference,
+                 bias_torsions: [{atoms: phi, energy: "-k*sin(theta)^2",
+                                  parameters: {k: 70.0}}]}
+reference: {kind: exact}
+analysis: {threshold_tv: 0.05, points: 5}
+slurm: {gres: null}
+"""
+
+
+def test_biased_reservoirs_give_the_exact_torsion_populations(tmp_path):
+    """A named torsion bias, reservoir-only methods and a reference from
+    reservoirs, on a model whose answer is exact."""
+    from resremd import testsystems
+
+    (tmp_path / "s.yml").write_text(TORSION_SPEC)
+    out = tmp_path / "bench"
+    assert main(["plan", str(tmp_path / "s.yml"), str(out)]) == 0
+    runs = (out / "jobs/runs.txt").read_text().split()
+    assert runs and not any("at_300" in r for r in runs)
+    jobs.run_all(out)
+    meta = json.loads((out / "reservoirs/at_300/trans/seed_1/reservoir.json")
+                      .read_text())
+    assert meta["kind"] == "weighted"
+    assert meta["source"]["bias_torsions"][0]["atoms"] == [0, 1, 2, 3]
+    assert main(["reference", str(out), str(tmp_path / "ref.json"),
+                 "--methods", "at_300", "--from-reservoirs"]) == 0
+    ref = json.loads((tmp_path / "ref.json").read_text())
+    assert ref["from_reservoirs"] and ref["runs"] == 4
+    assert abs(ref["populations"][0] - testsystems.cis_fraction(300.0)) \
+        < 0.03
+    summary = analyze.analyze(out)
+    assert set(summary["methods"]) == {"remd"}

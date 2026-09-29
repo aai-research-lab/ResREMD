@@ -63,6 +63,10 @@ class BenchSystem:
     def default_starts(self) -> dict[str, dict[str, Any]]:
         return {"start": {}}
 
+    def torsions(self, topology) -> dict[str, list[int]]:
+        """Named torsions a spec can bias by name (``atoms: omega``)."""
+        return {}
+
 
 # ---------------------------------------------------------------------------
 class DoubleWell(BenchSystem):
@@ -263,7 +267,108 @@ class Chignolin(BenchSystem):
         return (f[:, 0] > cut).astype(int)
 
 
-SYSTEMS = {cls.name: cls for cls in (DoubleWell, AlanineDipeptide, Chignolin)}
+# ---------------------------------------------------------------------------
+class TorsionModel(BenchSystem):
+    """Four atoms with an 80 kJ/mol cis/trans barrier: exact, and out of
+    reach of temperature. Cis is phi within 90 degrees of 0."""
+
+    name = "torsion_model"
+    states = ("cis", "trans")
+    feature_names = ("phi_deg", "angle_deg")
+    feature_bins = ((-180.0, 180.0, 24), (85.0, 133.0, 12))
+    platform = "Reference"
+
+    def prepare(self, out, *, temperature_K, platform, seed):
+        for start, cis in (("trans", False), ("cis", True)):
+            p = testsystems.torsion_model(cis=cis)
+            write_prepared(out / start, p.system, p.topology, p.positions)
+
+    def default_starts(self):
+        return {"trans": {}, "cis": {}}
+
+    def torsions(self, topology):
+        return {"phi": [0, 1, 2, 3]}
+
+    def features(self, traj, prepared):
+        import mdtraj as md
+
+        phi = md.compute_dihedrals(traj, [[0, 1, 2, 3]])[:, 0]
+        angle = md.compute_angles(traj, [[0, 1, 2]])[:, 0]
+        return np.degrees(np.column_stack([phi, angle]))
+
+    def labels_from_features(self, f):
+        return (np.abs(f[:, 0]) >= 90.0).astype(int)
+
+    def exact(self, temperature_K):
+        kt = BOLTZ * temperature_K
+        (a0, a1, n0), (b0, b1, n1) = self.feature_bins
+        phi = testsystems.torsion_grid()
+        p_phi = np.exp(-(testsystems.torsion_energy(phi)
+                         - testsystems.torsion_energy(phi).min()) / kt)
+        p_phi /= p_phi.sum()
+        h_phi = np.histogram(np.degrees(phi), bins=np.linspace(a0, a1, n0 + 1),
+                             weights=p_phi)[0]
+        # A bond angle's density carries the sin(theta) Jacobian.
+        th = np.radians(np.linspace(b0, b1, 4001))
+        p_th = np.sin(th) * np.exp(-0.5 * testsystems._ANGLE_K
+                                   * (th - testsystems._ANGLE_RAD) ** 2 / kt)
+        h_th = np.histogram(np.degrees(th), bins=np.linspace(b0, b1, n1 + 1),
+                            weights=p_th)[0]
+        cis = testsystems.cis_fraction(temperature_K)
+        return {"populations": np.array([cis, 1.0 - cis]),
+                "histogram": np.outer(h_phi, h_th / h_th.sum())}
+
+
+# ---------------------------------------------------------------------------
+class ProlineDipeptide(BenchSystem):
+    """Ac-Pro-NMe with Amber14, in GBn2 or TIP3P-FB: prolyl cis/trans.
+
+    States by omega, the ACE-PRO peptide bond: cis within 90 degrees of 0.
+    The second feature is the proline psi. The cis start is sought with the
+    omega barrier lowered by a bias, which is removed before the start is
+    written.
+    """
+
+    name = "proline_dipeptide"
+    states = ("cis", "trans")
+    feature_names = ("omega_deg", "psi_deg")
+    feature_bins = ((-180.0, 180.0, 24), (-180.0, 180.0, 24))
+
+    def prepare(self, out, *, temperature_K, platform, seed):
+        topology, positions = testsystems.proline_dipeptide(180.0)
+        system, top, pos, box = testsystems.prepare_peptide(
+            topology, positions, solvent=self.config.get("solvent", "implicit"),
+            padding_nm=float(self.config.get("padding_nm", 1.2)),
+            npt_ns=float(self.config.get("npt_ns", 0.5)),
+            temperature_K=temperature_K, platform=platform, seed=seed)
+        write_prepared(out / "trans", system, top, pos, box)
+
+    def default_starts(self):
+        return {"trans": {},
+                "cis": {"seek": {
+                    "state": "cis", "temperature_K": 400, "max_ns": 20,
+                    "check_ps": 2,
+                    "bias_torsions": [{"atoms": "omega",
+                                       "energy": "-k*sin(theta)^2",
+                                       "parameters": {"k": 60.0}}]}}}
+
+    def torsions(self, topology):
+        return {"omega": testsystems.omega_atoms(topology)}
+
+    def features(self, traj, prepared):
+        import mdtraj as md
+
+        top = traj.topology.to_openmm()
+        omega = md.compute_dihedrals(traj, [testsystems.omega_atoms(top)])
+        _, psi = md.compute_psi(traj)
+        return np.degrees(np.column_stack([omega[:, 0], psi[:, 0]]))
+
+    def labels_from_features(self, f):
+        return (np.abs(f[:, 0]) >= 90.0).astype(int)
+
+
+SYSTEMS = {cls.name: cls for cls in (DoubleWell, AlanineDipeptide, Chignolin,
+                                     TorsionModel, ProlineDipeptide)}
 
 
 def get(config: dict[str, Any]) -> BenchSystem:

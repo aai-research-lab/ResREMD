@@ -1,0 +1,20 @@
+# Reference for proline_implicit: reservoirs built at 300 K itself, under a
+# bias that lowers the omega barrier, and reweighted. Independent of replica
+# exchange. Then:
+#   resbench reference bench_pro_ref proline_implicit_reference.json \
+#       --methods biased_300 --from-reservoirs
+name: proline_implicit_reference
+system: {name: proline_dipeptide, solvent: implicit}
+temperatures_K: [300.0]
+seeds: [101, 102, 103, 104]
+equal_cost: false
+run: {duration_ns: 1, platform: auto}
+methods:
+  - name: biased_300
+    runs: false
+    reservoir:
+      generate: {temperature_K: 300.0, duration_ns: 200,
+                 frame_interval_steps: 1000, equilibration_ns: 1.0,
+                 bias_torsions: [{atoms: omega, energy: "-k*sin(theta)^2",
+                                  parameters: {k: 60.0}}]}
+reference: {kind: none}            # it makes one, see above

@@ -117,7 +117,7 @@ def check(raw: dict[str, Any]) -> dict[str, Any]:
             raise SpecError(f"Method name {m['name']!r} is used twice.")
         names.append(m["name"])
         extra = set(m) - {"name", "reservoir", "run", "starts", "note",
-                          "temperatures_K"}
+                          "temperatures_K", "runs"}
         if extra:
             raise SpecError(f"Method {m['name']}: unknown keys "
                             f"{', '.join(sorted(extra))}.")
@@ -129,6 +129,9 @@ def check(raw: dict[str, Any]) -> dict[str, Any]:
                     "temperatures_K": ladder}, f"method {m['name']}",
                    allow_ladder=True)
         _check_reservoir(spec, system, m)
+        if not m.get("runs", True) and not m.get("reservoir"):
+            raise SpecError(f"Method {m['name']}: `runs: false` is for a "
+                            "reservoir-only method, and it has no reservoir.")
         starts = m.get("starts")
         if starts is not None and not set(starts) <= set(spec["starts"]):
             raise SpecError(f"Method {m['name']}: unknown starts.")
@@ -205,10 +208,11 @@ def _check_reference(spec, system, names) -> None:
     if ref["kind"] is None:
         ref["kind"] = "exact" if system.exact(spec["temperatures_K"][0]) \
             is not None else None
-    if ref["kind"] not in ("exact", "pooled", "file"):
+    if ref["kind"] not in ("exact", "pooled", "file", "none"):
         raise SpecError("Say what the runs are compared with: "
                         "`reference.kind` is exact, file (long independent "
-                        "runs, see `resbench reference`) or pooled.")
+                        "runs, see `resbench reference`), pooled, or none "
+                        "for a spec that only makes a reference.")
     if ref["kind"] == "exact" and system.exact(spec["temperatures_K"][0]) \
             is None:
         raise SpecError(f"{system.name} has no exact answer.")
@@ -222,6 +226,13 @@ def _check_reference(spec, system, names) -> None:
         unknown = set(ref["methods"]) - set(names)
         if unknown:
             raise SpecError(f"Reference methods not in the spec: {unknown}.")
+        idle = [m["name"] for m in spec["methods"]
+                if m["name"] in ref["methods"] and not has_runs(m)]
+        if idle:
+            raise SpecError(f"A pooled reference pools runs, and "
+                            f"{', '.join(idle)} makes none; make a reference "
+                            "from its reservoirs with `resbench reference "
+                            "--from-reservoirs`.")
 
 
 # ---------------------------------------------------------------------------
@@ -265,6 +276,8 @@ def plan_costs(spec: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """
     plan = {}
     for m in spec["methods"]:
+        if not has_runs(m):
+            continue
         o = resolve(RUN, {**spec["run"], **(m.get("run") or {}),
                           "prepared": "x"})
         n = len(ladder_of(spec, m))
@@ -297,11 +310,27 @@ def plan_costs(spec: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return plan
 
 
+def has_runs(m: dict[str, Any]) -> bool:
+    """False for a reservoir-only method (one kept as a reference)."""
+    return bool(m.get("runs", True))
+
+
 def run_settings(spec: dict[str, Any], m: dict[str, Any]) -> dict[str, Any]:
-    """What resremd.run is given for this method, production length fixed."""
+    """What resremd.run is given for this method, production length fixed.
+
+    A reservoir method always saves its top temperature as well as the
+    lowest, for the coverage check.
+    """
     s = {**spec["run"], **(m.get("run") or {})}
     s.pop("duration_ns", None)
     s["production_steps"] = spec["_plan"][m["name"]]["production_steps"]
+    if m.get("reservoir"):
+        top = len(ladder_of(spec, m)) - 1
+        save = s.get("save_states", "all")
+        if save == "lowest":
+            s["save_states"] = [0, top]
+        elif isinstance(save, list):
+            s["save_states"] = sorted({*map(int, save), 0, top})
     return s
 
 

@@ -1,0 +1,44 @@
+# Tier 1b. A barrier temperature cannot cross: four atoms with an 80 kJ/mol
+# cis/trans torsion barrier, answer exact. A reservoir simulated under a
+# known bias on the torsion, and reweighted, carries both states; one
+# simulated plainly at the same temperature does not. CPU only.
+name: exact_torsion
+system: {name: torsion_model}
+temperatures_K: [300.0, 360.0, 432.0]
+seeds: [1, 2, 3, 4, 5]
+run:
+  production_steps: 5000000        # 10 ns per replica
+  exchange_interval_steps: 250
+  trajectory_interval_steps: 250
+  friction_per_ps: 5.0
+  equilibration_ns: 0.0
+  minimize: false
+  save_selection: all
+  platform: Reference
+methods:
+  - name: remd
+  - name: res_plain
+    note: 20 ns at 520 K, no bias; never crosses the barrier
+    reservoir:
+      generate: {temperature_K: 520.0, duration_ns: 20.0,
+                 frame_interval_steps: 500, equilibration_ns: 0.1,
+                 friction_per_ps: 5.0, platform: Reference}
+  - name: res_biased
+    note: the same, with the barrier lowered by 70 kJ/mol and reweighted
+    reservoir:
+      generate: {temperature_K: 520.0, duration_ns: 20.0,
+                 frame_interval_steps: 500, equilibration_ns: 0.1,
+                 friction_per_ps: 5.0, platform: Reference,
+                 bias_torsions: [{atoms: phi, energy: "-k*sin(theta)^2",
+                                  parameters: {k: 70.0}}]}
+  - name: res_biased_full
+    note: the barrier removed entirely; the weights then carry all of it
+    reservoir:
+      generate: {temperature_K: 520.0, duration_ns: 20.0,
+                 frame_interval_steps: 500, equilibration_ns: 0.1,
+                 friction_per_ps: 5.0, platform: Reference,
+                 bias_torsions: [{atoms: phi, energy: "-k*sin(theta)^2",
+                                  parameters: {k: 80.0}}]}
+reference: {kind: exact}
+analysis: {threshold_tv: 0.02, threshold_jsd: 0.01, points: 40}
+slurm: {gres: null, cpus_per_task: 1}

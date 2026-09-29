@@ -72,10 +72,68 @@ def _read_lowest(run: Path, system: systems.BenchSystem, prepared: Path
     return features, system.labels_from_features(features), manifest
 
 
+def _read_top(run: Path, system: systems.BenchSystem, prepared: Path,
+              manifest: dict[str, Any]) -> np.ndarray | None:
+    """State labels of the frames saved at the top temperature, if any."""
+    import mdtraj as md
+
+    top = manifest["states"][-1]
+    if not top.get("trajectory"):
+        return None
+    traj = md.load(str(run / top["trajectory"]),
+                   top=str(run / "topology.pdb"))
+    return system.labels_from_features(system.features(traj, prepared))
+
+
+_NOT_SOLUTE = {"NA", "CL", "K", "MG", "CA2", "Na+", "Cl-", "K+"}
+
+
+def _solute_frames(res, path: Path):
+    """The reservoir's frames as an MDTraj trajectory of the solute atoms,
+    read in chunks, so a solvated reservoir never sits in memory whole."""
+    import mdtraj as md
+
+    top = md.load_topology(str(path / "topology.pdb"))
+    keep = np.array([a.index for a in top.atoms
+                     if not a.residue.is_water
+                     and a.residue.name not in _NOT_SOLUTE])
+    if keep.size == top.n_atoms:
+        return md.Trajectory(np.array(res.positions), top)
+    pos = res.positions
+    xyz = np.concatenate([np.asarray(pos[i:i + 1000][:, keep])
+                          for i in range(0, len(pos), 1000)])
+    return md.Trajectory(xyz, top.subset(keep))
+
+
+class ReservoirFrames:
+    """Features and labels of each reservoir's frames, read once."""
+
+    def __init__(self, spec, out: Path, system) -> None:
+        self.spec, self.out, self.system = spec, out, system
+        self._cache: dict[Path, tuple] = {}
+
+    def __call__(self, m, start, seed):
+
+        from resremd.reservoir import Reservoir
+
+        path = jobmod.reservoir_dir(self.out, self.spec, m, start, seed)
+        if path not in self._cache:
+            res = Reservoir.open(path)
+            traj = _solute_frames(res, path)
+            made_from = jobmod.reservoir_start(self.spec, m, start)
+            f = self.system.features(
+                traj, jobmod.prepared_dir(self.out, made_from))
+            self._cache[path] = (path, res, f,
+                                 self.system.labels_from_features(f))
+        return self._cache[path]
+
+
 def load_runs(spec, out: Path, system) -> tuple[dict, list[str]]:
     """Complete runs, keyed (method, start, seed), and what is missing."""
     loaded, missing = {}, []
     for m in spec["methods"]:
+        if not specs.has_runs(m):
+            continue
         for start in specs.method_starts(spec, m):
             for seed in spec["seeds"]:
                 run = jobmod.run_dir(out, m["name"], start, seed)
@@ -259,6 +317,10 @@ def _finite(x):
 
 def analyze(out: Path) -> dict[str, Any]:
     spec = jobmod.load_out(out)
+    if spec["reference"]["kind"] == "none":
+        raise ValueError(f"{out} has no reference to compare with "
+                         "(`reference.kind: none`): it is for making one, "
+                         "with `resbench reference`.")
     system = systems.get(spec["system"])
     a = spec["analysis"]
     k = len(system.states)
@@ -269,6 +331,7 @@ def analyze(out: Path) -> dict[str, Any]:
         raise ValueError(f"No complete runs under {out}/runs.")
     reference = Reference(spec, system, loaded, out)
     floor = Floor(reference.full.get("histogram"))
+    frames = ReservoirFrames(spec, out, system)
     uses: dict[str, int] = {}
     for key in loaded:
         uses[key[0]] = uses.get(key[0], 0) + 1
@@ -316,6 +379,7 @@ def analyze(out: Path) -> dict[str, Any]:
 
         summ = d["summary"]
         check = summ.get("reservoir_check") or {}
+        cover = _coverage(spec, out, system, frames, m, start, seed, d)
         conv_rows.append({
             "method": name, "start": start, "seed": seed,
             "run_ns": time_ns[-1], "run_cost": float(cost[-1]),
@@ -337,12 +401,17 @@ def analyze(out: Path) -> dict[str, Any]:
             "reservoir_check_z": check.get("z"),
             "reservoir_implied_K": check.get(
                 "reservoir_temperature_implied_K"),
+            # Capped, so a certain disagreement (infinite z) survives JSON.
+            "coverage_max_abs_z": None if cover.get("max_abs_z") is None
+            else min(float(cover["max_abs_z"]), 999.0),
+            "coverage_unsupported": " ".join(
+                system.states[i] for i in cover.get("unsupported_states", [])),
             **{f"final_pop_{s}": pops[-1, j]
                for j, s in enumerate(system.states)},
         })
 
     agree_rows = _agreement(spec, curves, a["threshold_tv"])
-    res_rows = _reservoir_rows(spec, out, system)
+    res_rows = _reservoir_rows(spec, out, system, frames)
     adir = out / "analysis"
     adir.mkdir(exist_ok=True)
     for name, rows in (("curves", curve_rows), ("convergence", conv_rows),
@@ -373,6 +442,23 @@ def analyze(out: Path) -> dict[str, Any]:
     text = json.dumps(_clean(summary), indent=2, allow_nan=False)
     (adir / "summary.json").write_text(text + "\n")
     return summary
+
+
+def _coverage(spec, out, system, frames, m, start, seed, d
+              ) -> dict[str, Any]:
+    """The coverage check for one run, or {} when it cannot be made."""
+    if not m.get("reservoir"):
+        return {}
+    top = _read_top(d["run"], system, jobmod.prepared_dir(out, start),
+                    d["manifest"])
+    if top is None:
+        logger.warning("%s saved no top-temperature trajectory; no coverage "
+                       "check.", d["run"])
+        return {}
+    _, _, _, labels = frames(m, start, seed)
+    out_ = resremd.reservoir_coverage(d["run"], top, labels,
+                                      len(system.states))
+    return out_ if out_ and out_.get("status") == "ok" else {}
 
 
 def _agreement(spec, curves, threshold) -> list[dict[str, Any]]:
@@ -451,6 +537,10 @@ def _method_summary(spec, m, conv_rows, agree_rows, res_rows, system):
           if r["reservoir_check_z"] is not None]
     halves = [r["halves_tv"] for r in res_rows
               if r["method"] == name and r["halves_tv"] is not None]
+    cover = [r["coverage_max_abs_z"] for r in rows
+             if r["coverage_max_abs_z"] is not None]
+    unsupported = sorted({s for r in rows
+                          for s in r["coverage_unsupported"].split()})
     res = m.get("reservoir")
     return {
         "reservoir": None if res is None else
@@ -480,21 +570,21 @@ def _method_summary(spec, m, conv_rows, agree_rows, res_rows, system):
             [r["reservoir_implied_K"] for r in rows]),
         "reservoir_halves_tv_mean": float(np.mean(halves)) if halves
         else None,
+        "coverage_z_max_abs": float(np.max(cover)) if cover else None,
+        "coverage_unsupported_states": unsupported,
+        "coverage_runs_flagged": sum(1 for r in rows
+                                     if r["coverage_unsupported"]),
     }
 
 
-def _reservoir_rows(spec, out: Path, system: systems.BenchSystem
-                    ) -> list[dict[str, Any]]:
+def _reservoir_rows(spec, out: Path, system: systems.BenchSystem,
+                    frames: ReservoirFrames) -> list[dict[str, Any]]:
     """The reservoirs' own state populations, whole and by halves.
 
     Halves in the order the frames were made: a reservoir whose halves
     disagree had not converged at its own temperature, which no amount of
     replica exchange downstream can repair.
     """
-    import mdtraj as md
-
-    from resremd.reservoir import Reservoir
-
     rows = []
     k = len(system.states)
     seen = set()
@@ -507,12 +597,7 @@ def _reservoir_rows(spec, out: Path, system: systems.BenchSystem
                 if path in seen or not (path / "reservoir.json").exists():
                     continue
                 seen.add(path)
-                res = Reservoir.open(path)
-                top = md.load_topology(str(path / "topology.pdb"))
-                traj = md.Trajectory(np.asarray(res.positions), top)
-                made_from = jobmod.reservoir_start(spec, m, start)
-                f = system.features(traj, jobmod.prepared_dir(out, made_from))
-                lab = system.labels_from_features(f)
+                _, res, _, lab = frames(m, start, seed)
                 half = len(lab) // 2
                 w = res.weights
                 pops = (populations(lab, k) if w is None else
@@ -536,16 +621,79 @@ def _reservoir_rows(spec, out: Path, system: systems.BenchSystem
     return rows
 
 
+def reservoir_estimates(spec, out: Path, system, names: list[str]
+                        ) -> dict[str, Any]:
+    """Populations and histogram at the lowest temperature, from reservoirs
+    built at that temperature (for example under a bias, and weighted).
+
+    Each reservoir is one independent estimate; the standard error is over
+    reservoirs.
+    """
+
+    from resremd.reservoir import Reservoir
+
+    t_min = float(spec["temperatures_K"][0])
+    k = len(system.states)
+    pops, hists, kish, paths = [], [], [], []
+    for name in names:
+        m = specs.method(spec, name)
+        if not m.get("reservoir"):
+            raise ValueError(f"Method {name} has no reservoir.")
+        for start in specs.method_starts(spec, m):
+            for seed in spec["seeds"]:
+                path = jobmod.reservoir_dir(out, spec, m, start, seed)
+                if path in paths or not (path / "reservoir.json").exists():
+                    continue
+                res = Reservoir.open(path)
+                if res.temperature_K is None or \
+                        abs(res.temperature_K - t_min) > 1e-6:
+                    raise ValueError(
+                        f"{path} is at {res.temperature_K} K; a reference "
+                        f"from reservoirs needs them at {t_min} K.")
+                paths.append(path)
+                traj = _solute_frames(res, path)
+                made_from = jobmod.reservoir_start(spec, m, start)
+                f = system.features(traj, jobmod.prepared_dir(out, made_from))
+                lab = system.labels_from_features(f)
+                w = res.weights if res.weights is not None \
+                    else np.full(len(lab), 1.0 / len(lab))
+                pops.append(np.bincount(lab, weights=w, minlength=k)[:k]
+                            / w.sum())
+                (a0, a1, n0), (b0, b1, n1) = system.feature_bins
+                h, _, _ = np.histogram2d(f[:, 0], f[:, 1], bins=[n0, n1],
+                                         range=[[a0, a1], [b0, b1]],
+                                         weights=w)
+                if h.sum() > 0:
+                    hists.append(h / h.sum())
+                kish.append(float(1.0 / np.sum((w / w.sum()) ** 2)))
+    if len(pops) < 2:
+        raise ValueError("A reference from reservoirs needs at least two.")
+    pops = np.array(pops)
+    return {"populations": pops.mean(axis=0),
+            "stderr": pops.std(axis=0, ddof=1) / np.sqrt(len(pops)),
+            "histogram": np.mean(hists, axis=0) if hists else None,
+            "runs": len(pops), "effective_frames_kish": kish}
+
+
 def write_reference(out: Path, path: Path, methods: list[str] | None,
-                    last_fraction: float) -> dict[str, Any]:
-    """A reference file from a benchmark of long runs, for `kind: file`."""
+                    last_fraction: float, from_reservoirs: bool = False
+                    ) -> dict[str, Any]:
+    """A reference file for `kind: file`: from a benchmark of long runs, or
+    from reservoirs built at the lowest temperature."""
     spec = jobmod.load_out(out)
     system = systems.get(spec["system"])
-    loaded, missing = load_runs(spec, out, system)
-    pool = [d for key, d in loaded.items() if not methods or key[0] in methods]
-    if len(pool) < 2:
-        raise ValueError("A reference needs at least two complete runs.")
-    ref = pooled(system, pool, last_fraction)
+    missing: list[str] = []
+    if from_reservoirs:
+        if not methods:
+            raise ValueError("Name the reservoir methods to use.")
+        ref = reservoir_estimates(spec, out, system, methods)
+    else:
+        loaded, missing = load_runs(spec, out, system)
+        pool = [d for key, d in loaded.items()
+                if not methods or key[0] in methods]
+        if len(pool) < 2:
+            raise ValueError("A reference needs at least two complete runs.")
+        ref = pooled(system, pool, last_fraction)
     data = {"system": spec["system"],
             "temperature_K": spec["temperatures_K"][0],
             "states": list(system.states),
@@ -555,7 +703,9 @@ def write_reference(out: Path, path: Path, methods: list[str] | None,
             else ref["histogram"].tolist(),
             "feature_names": list(system.feature_names),
             "feature_bins": [list(b) for b in system.feature_bins],
-            "runs": ref["runs"], "last_fraction": last_fraction,
+            "runs": ref["runs"],
+            "last_fraction": None if from_reservoirs else last_fraction,
+            "from_reservoirs": from_reservoirs,
             "from": str(out.resolve()), "methods": methods,
             "missing_runs": missing}
     path.write_text(json.dumps(_clean(data), indent=2, allow_nan=False)
@@ -613,8 +763,10 @@ def format_summary(summary: dict[str, Any]) -> str:
                      " runs")
     head = (f"{'method':<20}{'start':<11}{'n':>3}"
             f"{'cost to converge, 1e6 steps (95% CI)':>38}"
-            f"{'final TV':>10}{'res acc':>9}{'max|z|':>8}{'halves':>8}")
+            f"{'final TV':>10}{'res acc':>9}{'max|z|':>8}{'halves':>8}"
+            f"{'cover':>8}")
     lines += [head, "-" * len(head)]
+    flagged = []
     for name, m in summary["methods"].items():
         acc = "" if m["reservoir_acceptance"] is None \
             else f"{m['reservoir_acceptance']:.2f}"
@@ -622,6 +774,15 @@ def format_summary(summary: dict[str, Any]) -> str:
             else f"{m['reservoir_check_z_max_abs']:.1f}"
         halves = "" if m["reservoir_halves_tv_mean"] is None \
             else f"{m['reservoir_halves_tv_mean']:.3f}"
+        cover = "" if m.get("coverage_z_max_abs") is None \
+            else f"{m['coverage_z_max_abs']:.1f}"
+        if m.get("coverage_unsupported_states"):
+            cover += "!"
+            flagged.append(f"{name}: the top replica visits "
+                           + ", ".join(m["coverage_unsupported_states"])
+                           + " but the reservoir never holds it, in "
+                           f"{m['coverage_runs_flagged']} of {m['runs']} "
+                           "runs")
         rows = list(m["starts"].items())
         if m.get("both_starts_converged_tv_cost_md_steps"):
             rows.append(("both", {
@@ -639,5 +800,10 @@ def format_summary(summary: dict[str, Any]) -> str:
             lines.append(
                 f"{name if i == 0 else '':<20}{start:<11}{s['runs']:>3}"
                 f"{ci:>38}{ftv:>10}"
-                + (f"{acc:>9}{z:>8}{halves:>8}" if i == 0 else ""))
+                + (f"{acc:>9}{z:>8}{halves:>8}{cover:>8}" if i == 0
+                   else ""))
+    lines += ["", "max|z|: reservoir temperature check; halves: TV between "
+              "the reservoir's halves; cover: coverage check, max |z| over "
+              "states ('!': a state missing from the reservoir)"]
+    lines += ["MISSING STATE: " + f for f in flagged]
     return "\n".join(lines)

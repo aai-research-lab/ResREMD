@@ -16,7 +16,9 @@ ends in tables (CSV/JSON) and a plotting script you run yourself.
 | tier | system | states | features (2D histogram) | starts |
 |---|---|---|---|---|
 | 1 | double well (`double_well`), exact | left, right well | x, y | right (disfavoured), left |
+| 1b | four-atom torsion (`torsion_model`), exact, 80 kJ/mol barrier | cis, trans | phi, bond angle | trans, cis |
 | 2 | alanine dipeptide, GBn2 or TIP3P-FB | alpha_R, beta, PPII, alpha_L | phi, psi | extended; alpha_L (sought at 600 K) |
+| 2b | Ac-Pro-NMe (`proline_dipeptide`), GBn2 or TIP3P-FB | cis, trans (omega within 90 degrees of 0) | omega, psi | trans; cis (sought at 400 K under an omega bias) |
 | 3 | chignolin CLN025 (PDB 5AWL), GBn2 or TIP3P-FB | folded, unfolded | C-alpha RMSD to 5AWL, C-alpha Rg | folded; unfolded (sought at 600 K) |
 
 - Force field: Amber14 (ff14SB), HBonds constrained, 2 fs.
@@ -28,7 +30,25 @@ ends in tables (CSV/JSON) and a plotting script you run yourself.
 - Chignolin counts as folded at a C-alpha RMSD of 0.2 nm or less from 5AWL.
 - Second starts are *sought*: dynamics at 600 K from the first start until
   the condition holds, then a short minimisation. The box is not touched,
-  so every start is the same system and can share a reservoir.
+  so every start is the same system and can share a reservoir. The proline
+  cis start is sought under a bias on omega, which is removed before the
+  start is written.
+- Tiers 1b and 2b carry a barrier temperature cannot cross in any
+  affordable time. There the question is whether a reservoir generated under
+  a known bias, and reweighted, carries sampling the ladder cannot.
+
+### Biased reservoirs and reservoir-only methods
+
+A `generate` block can carry `bias_torsions`, with the torsion named
+(`atoms: omega`, `atoms: phi`) or given as four atom indices. The reservoir is
+then of kind `weighted`. A method with `runs: false` only builds reservoirs,
+for example ones at the lowest temperature that serve as a reference
+independent of replica exchange:
+
+```
+resbench reference bench_pro_ref bench_pro/proline_implicit_reference.json \
+    --methods biased_300 --from-reservoirs
+```
 
 ## How runs are compared
 
@@ -96,10 +116,15 @@ from opposite starts. It needs no reference.
   halves. They differ when its simulation had not converged.
 - **Lineage.** Acceptance, the fraction of lowest-temperature samples
   descended from the reservoir, and the effective number of ancestors.
+- **Coverage.** The top replica's state populations against the
+  reservoir's, reweighted to the top temperature (max |z| over states).
+  A state the top replica visits but the reservoir never holds is flagged
+  (`!` in the table, and a `MISSING STATE` line). It sees only states the
+  top replica reaches on its own.
 
-A reservoir with a state entirely missing passes all of these. Only a
-reference exposes it, which is itself one of the findings tier 1 is
-designed to show.
+A reservoir with a state entirely missing passes the temperature check,
+the halves and agreement between starts; in tier 1 only the reference and
+the coverage check expose it.
 
 ## Specs
 
@@ -107,6 +132,10 @@ designed to show.
 |---|---|---|
 | `smoke.yml` | does the harness work (CI runs it) | CPU, 15 s |
 | `exact_defects.yml` | tier 1: seven reservoirs, each flawed in one way, against plain REMD | CPU, about an hour |
+| `exact_torsion.yml` | tier 1b: plain against bias-weighted reservoirs across a barrier | CPU, about an hour |
+| `proline_implicit_reference.yml` | reweighted reservoirs at 300 K for tier 2b's reference | one GPU, a day |
+| `proline_implicit.yml` | tier 2b: plain against bias-weighted reservoirs | one GPU, a day |
+| `proline_explicit_reference.yml`, `proline_explicit.yml` | tier 2b in water | GPU-days |
 | `alanine_implicit_reference.yml` | long plain REMD for tier 2's reference | one GPU, a day |
 | `alanine_implicit.yml` | tier 2: reservoir length and temperature | one GPU, hours |
 | `alanine_explicit.yml` | tier 2 in water, 14 replicas | GPU-days |
@@ -176,7 +205,7 @@ Subclass `BenchSystem` in `resbench/systems.py` and register it in
 - how it is prepared;
 - its states;
 - two features computed from an MDTraj trajectory;
-- optionally, the exact answer.
+- optionally, the exact answer, and named torsions a bias can refer to.
 
 ## Outputs
 
@@ -185,7 +214,7 @@ Subclass `BenchSystem` in `resbench/systems.py` and register it in
 | file | contents |
 |---|---|
 | `curves.csv` | per run and grid point: time, cost, populations, TV error, JSD |
-| `convergence.csv` | per run: convergence time and cost, final error, exchange and reservoir diagnostics |
+| `convergence.csv` | per run: convergence time and cost, final error, exchange and reservoir diagnostics, coverage |
 | `agreement.csv` | per method, seed and time: distance between starts |
 | `reservoirs.csv` | per reservoir: populations, halves distance, cost |
 | `figures/` | from `plots/plot_benchmark.py`: convergence, cost to converge, populations, agreement |

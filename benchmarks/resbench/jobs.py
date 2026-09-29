@@ -78,6 +78,8 @@ def job_list(spec: dict[str, Any]) -> dict[str, list[str]]:
             else:
                 reservoirs += [f"reservoir/{m['name']}/{st}/{s}"
                                for st in starts for s in spec["seeds"]]
+        if not specs.has_runs(m):
+            continue
         for start in starts:
             runs += [f"run/{m['name']}/{start}/{s}" for s in spec["seeds"]]
     return {"prepare": ["prepare"], "reservoirs": reservoirs, "runs": runs}
@@ -259,7 +261,16 @@ def seek(system: systems.BenchSystem, source: Path, target: Path,
     check_steps = max(1, int(round(float(cfg.get("check_ps", 10)) * 500)))
     max_steps = int(round(float(cfg.get("max_ns", 20)) * 5e5))
     integ = make_integrator("langevin_middle", t, 1.0, 2.0, seed)
-    ctx, _ = create_context(p.system, integ, platform=platform,
+    seek_system = p.system
+    if cfg.get("bias_torsions"):
+        # Lower a barrier to get across it; the start is written with the
+        # unbiased System.
+        from resremd.build import add_torsion_biases
+
+        seek_system, _ = add_torsion_biases(
+            p.system, resolve_biases(system, source, cfg["bias_torsions"]),
+            p.n_atoms)
+    ctx, _ = create_context(seek_system, integ, platform=platform,
                             precision="mixed", device=None, cpu_threads=None)
     if p.box is not None:
         ctx.setPeriodicBoxVectors(*(openmm.Vec3(*r) for r in p.box))
@@ -319,9 +330,33 @@ def build_reservoir(spec: dict[str, Any], out: Path, method: dict[str, Any],
         system.exact_reservoir(path, res["exact"], job_seed)
         return
     resume = (path / "build_checkpoint.npz").exists()
+    settings = dict(res["generate"])
+    if settings.get("bias_torsions"):
+        system = systems.get(spec["system"])
+        settings["bias_torsions"] = resolve_biases(
+            system, prepared_dir(out, start), settings["bias_torsions"])
     resremd.generate_reservoir(prepared=str(prepared_dir(out, start)),
                                output=str(path), resume=resume,
-                               random_seed=job_seed, **res["generate"])
+                               random_seed=job_seed, **settings)
+
+
+def resolve_biases(system: systems.BenchSystem, prepared: Path,
+                   biases: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Replace torsion names (``atoms: omega``) with atom indices."""
+    names = None
+    out = []
+    for b in biases:
+        b = dict(b)
+        if isinstance(b.get("atoms"), str):
+            if names is None:
+                names = system.torsions(load_prepared(prepared).topology)
+            if b["atoms"] not in names:
+                raise ValueError(f"{system.name} names no torsion "
+                                 f"{b['atoms']!r}; it names "
+                                 f"{', '.join(names) or 'none'}.")
+            b["atoms"] = names[b["atoms"]]
+        out.append(b)
+    return out
 
 
 def run_one(spec: dict[str, Any], out: Path, method: dict[str, Any],

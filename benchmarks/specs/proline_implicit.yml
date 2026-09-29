@@ -1,0 +1,28 @@
+# Tier 2b. Ac-Pro-NMe, Amber14 in GBn2: prolyl cis/trans, a barrier of about
+# 80 kJ/mol that the ladder does not cross. Starts trans and cis.
+name: proline_implicit
+system: {name: proline_dipeptide, solvent: implicit}
+# Four rungs of the geometric ladder whose fifth, 450 K, is the reservoir.
+temperatures_K: [300.0, 332.0, 367.42, 406.62]
+seeds: [1, 2, 3, 4, 5]
+run:
+  duration_ns: 20
+  exchange_interval_steps: 500
+  trajectory_interval_steps: 500
+  equilibration_ns: 0.1
+  save_selection: solute
+  platform: auto
+methods:
+  - name: remd
+  - name: res_plain
+    reservoir:
+      generate: {temperature_K: 450.0, duration_ns: 50,
+                 frame_interval_steps: 2500}
+  - name: res_biased
+    reservoir:
+      generate: {temperature_K: 450.0, duration_ns: 50,
+                 frame_interval_steps: 2500,
+                 bias_torsions: [{atoms: omega, energy: "-k*sin(theta)^2",
+                                  parameters: {k: 60.0}}]}
+reference: {kind: file, path: proline_implicit_reference.json}
+analysis: {threshold_tv: 0.02, threshold_jsd: 0.02}

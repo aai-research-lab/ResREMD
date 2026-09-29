@@ -21,6 +21,16 @@ def estimate(out: Path, ns_per_day: float | None) -> str:
     total_steps = 0.0
     total_ns = 0.0
     for m in spec["methods"]:
+        if not specs.has_runs(m):
+            one = specs.reservoir_steps(m)
+            count = 1 if m["reservoir"].get("shared") else \
+                len(specs.method_starts(spec, m)) * len(spec["seeds"])
+            total_steps += one * count
+            dt = (m["reservoir"].get("generate") or {}).get("timestep_fs", 2.0)
+            total_ns += one * count * dt / 1e6
+            lines.append(f"{m['name']:<22}reservoirs only: {count} x "
+                         f"{one / 1e6:.2f}e6 steps")
+            continue
         p = spec["_plan"][m["name"]]
         n_runs = len(specs.method_starts(spec, m)) * len(spec["seeds"])
         reservoirs = 0
@@ -70,6 +80,9 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("file")
     a.add_argument("--methods", nargs="+")
     a.add_argument("--last-fraction", type=float, default=0.5)
+    a.add_argument("--from-reservoirs", action="store_true",
+                   help="Use the named methods' reservoirs, built at the "
+                        "lowest temperature, instead of runs.")
     a = sub.add_parser("cost", help="How much dynamics the plan needs.")
     a.add_argument("out")
     a.add_argument("--ns-per-day", type=float,
@@ -97,7 +110,8 @@ def main(argv: list[str] | None = None) -> int:
         print(analysis.format_summary(analysis.analyze(out)))
     elif args.cmd == "reference":
         data = analysis.write_reference(out, Path(args.file), args.methods,
-                                        args.last_fraction)
+                                        args.last_fraction,
+                                        args.from_reservoirs)
         print(f"{args.file}: {data['runs']} runs, populations "
               + ", ".join(f"{s} {p:.4f} +- {e:.4f}" for s, p, e in zip(
                   data["states"], data["populations"], data["stderr"])))
