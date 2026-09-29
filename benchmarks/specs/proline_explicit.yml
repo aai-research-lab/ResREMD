@@ -1,5 +1,6 @@
 # Tier 2b in water. Ac-Pro-NMe in TIP3P-FB at constant volume. Pilot the
-# ladder first: 20 to 40 percent neighbour acceptance.
+# ladder first: 20 to 40 percent neighbour acceptance. REST2 is here and not
+# in the implicit-solvent spec: it needs explicit solvent.
 name: proline_explicit
 system: {name: proline_dipeptide, solvent: explicit, padding_nm: 1.2,
          npt_ns: 1.0}
@@ -24,5 +25,21 @@ methods:
                  frame_interval_steps: 2500,
                  bias_torsions: [{atoms: omega, energy: "-k*sin(theta)^2",
                                   parameters: {k: 60.0}}]}
+  # REST2 heats only the solute, so a few replicas span a wide range.
+  # A short CPU pilot gave 15 to 45 percent neighbour acceptance; pilot it
+  # longer on a GPU before a production run.
+  - name: rest2
+    temperatures_K: [300.0, 417.0, 580.0, 806.0, 1121.0, 1558.0, 2166.0,
+                     3000.0]
+    run: {rest2: true}
+  - name: rest2_res
+    note: REST2 with a reservoir of its own top state, stopping itself
+    temperatures_K: [300.0, 417.0, 580.0, 806.0, 1121.0, 1558.0, 2166.0,
+                     3000.0]
+    run: {rest2: true}
+    reservoir:
+      generate: {temperature_K: 3000.0, rest2_run_temperature_K: 300.0,
+                 duration_ns: 100, frame_interval_steps: 2500,
+                 convergence_torsions: [omega], convergence_tv: 0.02}
 reference: {kind: file, path: proline_explicit_reference.json}
 analysis: {threshold_tv: 0.02, threshold_jsd: 0.02, mbar: true}
