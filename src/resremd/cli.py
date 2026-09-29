@@ -50,8 +50,9 @@ def _add_options(parser: argparse.ArgumentParser, schema: Schema) -> None:
                 # Mixed settings such as save_states take words too; they are
                 # converted after parsing.
                 if option.type is list:
-                    # A mapping per item arrives as JSON text.
-                    kwargs["type"] = json.loads if option.items is dict \
+                    # A mapping or list per item arrives as JSON text.
+                    kwargs["type"] = json.loads \
+                        if option.items in (dict, list) \
                         else (option.items or str)
             else:
                 kwargs["type"] = option.type

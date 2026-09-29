@@ -69,3 +69,13 @@ def test_template_names_every_option():
         text = template(schema)
         for option in schema.options:
             assert f"{option.name}:" in text
+
+
+def test_list_settings_of_mappings_and_lists_are_read_as_json():
+    args = build_parser().parse_args([
+        "reservoir", "generate", "--prepared", "x", "--output", "r",
+        "--temperature-K", "500", "--duration-ns", "1",
+        "--bias-torsions", '{"atoms": [0, 1, 2, 3], "energy": "theta"}',
+        "--convergence-torsions", "[0, 1, 2, 3]", "[1, 2, 3, 4]"])
+    assert args.bias_torsions == [{"atoms": [0, 1, 2, 3], "energy": "theta"}]
+    assert args.convergence_torsions == [[0, 1, 2, 3], [1, 2, 3, 4]]

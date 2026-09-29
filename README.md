@@ -153,6 +153,20 @@ upper bound, and not as proof that the reservoir is converged.
   are accepted. Leaving `temperature_max_K` out places the reservoir one
   geometric rung above the hottest replica, as in the GROMACS
   implementation.
+- **Reservoir length.** The reservoir's own simulation is usually most of
+  the cost, and it only needs to be long enough to have converged at its
+  temperature. Name the torsions of the slow change and a tolerance, and
+  the build stops once the histograms of its two halves agree, with
+  `duration_ns` as the most it may take:
+  ```
+  resremd reservoir generate --prepared setup --temperature-K 450 \
+      --duration-ns 200 --convergence-torsions "[4, 6, 8, 10]" \
+      --convergence-tv 0.02 --output reservoir
+  ```
+  The history of the test is in `reservoir.json`. Halves that agree are
+  necessary, not sufficient: a simulation that never leaves its first
+  state agrees with itself. Build two reservoirs from different starts and
+  compare them to rule that out.
 - **Exchange interval.** 500 steps (1 ps at 2 fs) by default, as
   `-replex 500` in GROMACS.
 - **Ensemble.** Constant volume is usual for explicit-solvent temperature

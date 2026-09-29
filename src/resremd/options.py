@@ -325,6 +325,34 @@ BIAS_TORSIONS = Option(
     example=[{"atoms": [4, 6, 8, 10], "energy": "-k*sin(theta)^2",
               "parameters": {"k": 60.0}}])
 
+CONVERGENCE_TORSIONS = Option(
+    "convergence_torsions", list, None,
+    "Torsions (four atom indices each) whose distribution judges whether "
+    "the reservoir has converged: the build compares the histograms of its "
+    "first and second halves, with the bias weights if any, and reports the "
+    "largest total variation distance. With `convergence_tv` it also stops "
+    "there. Pick the torsions of the slow change: a proline omega, the "
+    "backbone phi and psi of a turn.",
+    group="Run length", items=list, example=[[4, 6, 8, 10]])
+
+CONVERGENCE_TV = Option(
+    "convergence_tv", float, None,
+    "Stop the build once the halves of every `convergence_torsions` "
+    "histogram agree within this total variation distance, at two checks "
+    "in a row (checks come with each checkpoint, about every 500 ps), and "
+    "keep `duration_ns` as the most it may take. Agreeing halves are "
+    "necessary, not sufficient: a simulation that never leaves its first "
+    "state agrees with itself too. Build from two different starts and "
+    "compare them to rule that out.",
+    group="Run length", minimum=0.0, maximum=1.0, minimum_exclusive=True,
+    example=0.02)
+
+CONVERGENCE_BINS = Option(
+    "convergence_bins", int, 6,
+    "Bins per torsion for the convergence histograms (60 degrees each by "
+    "default). Fewer bins need fewer frames for the same distance.",
+    group="Run length", minimum=2)
+
 TRAJECTORIES = Option(
     "trajectories", list, None,
     "Trajectory files to read frames from (any format MDTraj reads), in "
@@ -391,7 +419,8 @@ GENERATE = Schema(
     options=(
         PREPARED, OUTPUT_RESERVOIR, RESUME,
         RESERVOIR_TEMPERATURE, FRAME_INTERVAL, BIAS_TORSIONS,
-        RESERVOIR_DURATION, RESERVOIR_EQUILIBRATION, MINIMIZE,
+        RESERVOIR_DURATION, RESERVOIR_EQUILIBRATION, CONVERGENCE_TORSIONS,
+        CONVERGENCE_TV, CONVERGENCE_BINS, MINIMIZE,
         INTEGRATOR, TIMESTEP, FRICTION, ENSEMBLE, PRESSURE,
         BAROSTAT_FREQUENCY, RANDOM_SEED,
         PLATFORM, PRECISION, DEVICE_INDEX, CPU_THREADS,

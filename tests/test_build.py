@@ -189,3 +189,147 @@ def test_bad_biases_are_refused(tmp_path, bias, match):
             testsystems.torsion_model(), output=str(tmp_path / "r"),
             temperature_K=520.0, duration_ns=0.02, frame_interval_steps=100,
             platform="Reference", bias_torsions=bias)
+
+
+def test_truncate_npy_keeps_the_first_rows(tmp_path):
+    from resremd.build import truncate_npy
+
+    for shape, dtype in (((50, 3, 3), np.float64), ((50,), np.float32)):
+        a = np.arange(np.prod(shape), dtype=dtype).reshape(shape)
+        np.save(tmp_path / "a.npy", a)
+        truncate_npy(tmp_path / "a.npy", 17)
+        assert np.array_equal(np.load(tmp_path / "a.npy"), a[:17])
+
+
+def test_halves_tv():
+    from resremd.build import halves_tv
+
+    same = np.tile([[-170.0], [10.0]], (50, 1))
+    assert halves_tv(same, 6) == 0.0
+    split = np.concatenate([np.full((50, 1), -170.0), np.full((50, 1), 10.0)])
+    assert halves_tv(split, 6) == pytest.approx(1.0)
+    # Weights count: the second half's lone left frame outweighs the rest.
+    w = np.ones(100)
+    mixed = split.copy()
+    mixed[99] = -170.0
+    w[99] = 1e6
+    assert halves_tv(mixed, 6, w) < 0.01
+
+
+CONVERGE = dict(temperature_K=520.0, duration_ns=20.0,
+                frame_interval_steps=500, equilibration_ns=0.05,
+                friction_per_ps=5.0, platform="Reference", random_seed=3,
+                minimize=False, bias_torsions=testsystems.torsion_bias(70.0),
+                convergence_torsions=[[0, 1, 2, 3]], convergence_tv=0.03)
+
+
+def test_a_build_stops_once_its_halves_agree(tmp_path):
+    meta = resremd.generate_reservoir(testsystems.torsion_model(),
+                                      output=str(tmp_path / "r"), **CONVERGE)
+    conv = meta["convergence"]
+    assert conv["converged"] and meta["n_frames"] < 40000
+    assert all(v <= 0.03 for _, v in conv["history"][-2:])
+    assert meta["cost"]["md_steps"]["production"] == meta["n_frames"] * 500
+    res = Reservoir.open(tmp_path / "r")
+    assert res.positions.shape[0] == len(res.weights) == meta["n_frames"]
+    assert np.load(tmp_path / "r/build_torsions_deg.npy").shape == (
+        meta["n_frames"], 1)
+    est, se = _cis_estimate(tmp_path / "r")
+    assert abs(est - testsystems.cis_fraction(520.0)) < max(4 * se, 0.02)
+
+
+def test_a_stopped_convergence_build_resumes(tmp_path):
+    def stop(info):
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    first = resremd.generate_reservoir(testsystems.torsion_model(),
+                                       output=str(tmp_path / "r"),
+                                       on_progress=stop, **CONVERGE)
+    assert not first["complete"]
+    with pytest.raises(Exception, match="convergence"):
+        resremd.generate_reservoir(testsystems.torsion_model(),
+                                   output=str(tmp_path / "r"), resume=True,
+                                   **{**CONVERGE, "convergence_tv": 0.05})
+    meta = resremd.generate_reservoir(testsystems.torsion_model(),
+                                      output=str(tmp_path / "r"), resume=True,
+                                      **CONVERGE)
+    # The check made before the stop (at frame 500) is kept.
+    frames = [f for f, _ in meta["convergence"]["history"]]
+    assert meta["complete"] and frames[0] == 500
+    assert frames == sorted(set(frames))
+
+
+def test_convergence_settings_are_checked(tmp_path):
+    args = dict(temperature_K=520.0, duration_ns=0.02,
+                frame_interval_steps=100, platform="Reference")
+    with pytest.raises(InputError, match="needs `convergence_torsions`"):
+        resremd.generate_reservoir(testsystems.torsion_model(),
+                                   output=str(tmp_path / "a"),
+                                   convergence_tv=0.02, **args)
+    with pytest.raises(InputError, match="four distinct"):
+        resremd.generate_reservoir(testsystems.torsion_model(),
+                                   output=str(tmp_path / "b"),
+                                   convergence_torsions=[[0, 1, 2, 2]], **args)
+
+
+def test_a_build_that_fails_while_finishing_early_resumes_to_finish(
+        tmp_path, monkeypatch):
+    import resremd.build as build
+
+    real = build.write_topology
+
+    def full_disk(*args, **kwargs):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(build, "write_topology", full_disk)
+    with pytest.raises(OSError):
+        resremd.generate_reservoir(testsystems.torsion_model(),
+                                   output=str(tmp_path / "r"), **CONVERGE)
+    monkeypatch.setattr(build, "write_topology", real)
+    meta = resremd.generate_reservoir(testsystems.torsion_model(),
+                                      output=str(tmp_path / "r"), resume=True,
+                                      **CONVERGE)
+    assert meta["complete"] and meta["convergence"]["converged"]
+    assert Reservoir.open(tmp_path / "r").n_frames == meta["n_frames"] < 40000
+
+
+def test_a_resume_with_another_frame_interval_is_refused(tmp_path):
+    from resremd.errors import ResumeError
+
+    def stop(info):
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    common = dict(output=str(tmp_path / "r"), temperature_K=520.0,
+                  duration_ns=1.2, equilibration_ns=0.0, platform="Reference",
+                  random_seed=2, minimize=False)
+    resremd.generate_reservoir(testsystems.double_well(), on_progress=stop,
+                               frame_interval_steps=200, **common)
+    with pytest.raises(ResumeError, match="frame interval"):
+        resremd.generate_reservoir(testsystems.double_well(), resume=True,
+                                   frame_interval_steps=400, **common)
+
+
+def test_a_stop_request_is_not_a_convergence_check(tmp_path, monkeypatch):
+    import resremd.build as build
+
+    real = build.torsion_angles_deg
+    frames = []
+
+    def angles_then_stop(*args):
+        frames.append(1)
+        if len(frames) == 501:      # one frame after the first check
+            os.kill(os.getpid(), signal.SIGTERM)
+        return real(*args)
+
+    monkeypatch.setattr(build, "torsion_angles_deg", angles_then_stop)
+    # Any two checks would pass this tolerance.
+    meta = resremd.generate_reservoir(testsystems.torsion_model(),
+                                      output=str(tmp_path / "r"),
+                                      **{**CONVERGE, "convergence_tv": 1.0})
+    assert not meta["complete"]
+    with np.load(tmp_path / "r/build_checkpoint.npz") as data:
+        import json
+
+        saved = json.loads(str(data["meta"]))
+    assert saved["frames"] == 501
+    assert [f for f, _ in saved["convergence_history"]] == [500]
