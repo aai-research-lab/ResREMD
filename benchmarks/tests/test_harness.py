@@ -71,8 +71,11 @@ def test_smoke_end_to_end(tmp_path):
     # Each run has its own reservoir, made from its own start.
     assert (out / "reservoirs/resremd_generated/left/seed_1/reservoir.json"
             ).exists()
+    # Reservoirs from opposite starts, compared seed by seed.
+    assert len(summary["methods"]["resremd_generated"]
+               ["reservoir_starts_tv"]) == 2
     for name in ("curves.csv", "convergence.csv", "agreement.csv",
-                 "reservoirs.csv", "summary.json"):
+                 "reservoirs.csv", "reservoir_agreement.csv", "summary.json"):
         assert (out / "analysis" / name).stat().st_size > 0
     json.loads((out / "analysis/summary.json").read_text())  # strict JSON
     # Running again redoes nothing.

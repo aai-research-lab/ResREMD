@@ -31,8 +31,11 @@ run's energies, for the same stretches. Columns ending in `_mbar`.
 **Agreement** is the TV distance between a seed's runs from opposite
 starts. Their reservoirs are separate, so they are independent.
 
+**Reservoir agreement** is the TV distance between a seed's reservoirs from
+opposite starts. It needs neither runs nor a reference.
+
 Outputs, in <benchmark>/analysis/: curves.csv, convergence.csv,
-agreement.csv, reservoirs.csv, summary.json.
+agreement.csv, reservoirs.csv, reservoir_agreement.csv, summary.json.
 """
 
 from __future__ import annotations
@@ -429,10 +432,12 @@ def analyze(out: Path) -> dict[str, Any]:
 
     agree_rows = _agreement(spec, curves, a["threshold_tv"])
     res_rows = _reservoir_rows(spec, out, system, frames)
+    res_agree_rows = _reservoir_agreement(spec, res_rows, system)
     adir = out / "analysis"
     adir.mkdir(exist_ok=True)
     for name, rows in (("curves", curve_rows), ("convergence", conv_rows),
-                       ("agreement", agree_rows), ("reservoirs", res_rows)):
+                       ("agreement", agree_rows), ("reservoirs", res_rows),
+                       ("reservoir_agreement", res_agree_rows)):
         _write_csv(adir / f"{name}.csv", rows)
 
     summary = {
@@ -453,7 +458,8 @@ def analyze(out: Path) -> dict[str, Any]:
         "mbar": bool(a["mbar"]),
         "missing_runs": missing,
         "methods": {m["name"]: _method_summary(spec, m, conv_rows, agree_rows,
-                                               res_rows, system)
+                                               res_rows, system,
+                                               res_agree_rows)
                     for m in spec["methods"]
                     if any(r["method"] == m["name"] for r in conv_rows)},
     }
@@ -549,7 +555,8 @@ def _median_block(values: list, limit: float) -> dict[str, Any]:
     return out
 
 
-def _method_summary(spec, m, conv_rows, agree_rows, res_rows, system):
+def _method_summary(spec, m, conv_rows, agree_rows, res_rows, system,
+                    res_agree_rows=()):
     name = m["name"]
     rows = [r for r in conv_rows if r["method"] == name]
     starts = specs.method_starts(spec, m)
@@ -630,6 +637,11 @@ def _method_summary(spec, m, conv_rows, agree_rows, res_rows, system):
             [r["reservoir_implied_K"] for r in rows]),
         "reservoir_halves_tv_mean": float(np.mean(halves)) if halves
         else None,
+        "reservoir_starts_tv": [r["tv_between_reservoirs"]
+                                for r in res_agree_rows
+                                if r["method"] == name] or None,
+        "reservoir_starts_z": [r["max_abs_z"] for r in res_agree_rows
+                               if r["method"] == name] or None,
         "coverage_z_max_abs": float(np.max(cover)) if cover else None,
         "coverage_unsupported_states": unsupported,
         "coverage_runs_flagged": sum(1 for r in rows
@@ -669,6 +681,12 @@ def _reservoir_rows(spec, out: Path, system: systems.BenchSystem,
 
                 pops = pops_of(slice(None))
                 a, b = pops_of(slice(0, half)), pops_of(slice(half, None))
+                # Standard error from ten consecutive blocks, which also
+                # sees correlation between frames longer than a block.
+                blocks = np.array_split(np.arange(len(lab)), 10)
+                per_block = np.array([pops_of(bk) for bk in blocks
+                                      if w[bk].sum() > 0])
+                se = per_block.std(axis=0, ddof=1) / np.sqrt(len(per_block))
                 shared = m["reservoir"].get("shared")
                 rows.append({
                     "method": m["name"],
@@ -681,7 +699,55 @@ def _reservoir_rows(spec, out: Path, system: systems.BenchSystem,
                     "halves_tv": total_variation(a, b),
                     **{f"pop_{s}": pops[j]
                        for j, s in enumerate(system.states)},
+                    **{f"pop_se_{s}": se[j]
+                       for j, s in enumerate(system.states)},
                 })
+    return rows
+
+
+#: A reservoir pair differs beyond its noise at |z| above this.
+RESERVOIR_Z = 4.0
+
+
+def _reservoir_agreement(spec, res_rows, system) -> list[dict[str, Any]]:
+    """The distance between the same seed's reservoirs from opposite starts.
+
+    Each reservoir is made from its own run's start, so two that disagree
+    beyond their noise (block standard errors, |z| above RESERVOIR_Z) have
+    not forgotten where they began: a barrier their temperature does not
+    cross. It needs no runs and no reference. Like agreement between runs,
+    it shows the starts were forgotten, not that either is right.
+    """
+    rows = []
+    states = system.states
+    for m in spec["methods"]:
+        if not m.get("reservoir") or m["reservoir"].get("shared"):
+            continue
+        starts = specs.method_starts(spec, m)
+        if len(starts) < 2:
+            continue
+        a0, a1 = starts[:2]
+        for seed in spec["seeds"]:
+            r0 = [r for r in res_rows if r["method"] == m["name"]
+                  and r["start"] == a0 and r["seed"] == seed]
+            r1 = [r for r in res_rows if r["method"] == m["name"]
+                  and r["start"] == a1 and r["seed"] == seed]
+            if not r0 or not r1:
+                continue
+            p0 = np.array([r0[0][f"pop_{s}"] for s in states])
+            p1 = np.array([r1[0][f"pop_{s}"] for s in states])
+            var = np.array([r0[0][f"pop_se_{s}"] ** 2
+                            + r1[0][f"pop_se_{s}"] ** 2 for s in states])
+            diff = np.abs(p0 - p1)
+            z = np.where(diff < 1e-9, 0.0,
+                         np.divide(diff, np.sqrt(var),
+                                   out=np.full(len(diff), np.inf),
+                                   where=var > 0))
+            rows.append({"method": m["name"], "seed": seed,
+                         "starts": f"{a0}|{a1}",
+                         "tv_between_reservoirs": total_variation(p0, p1),
+                         # Capped: a certain disagreement is infinite.
+                         "max_abs_z": min(float(np.max(z)), 999.0)})
     return rows
 
 
@@ -828,9 +894,9 @@ def format_summary(summary: dict[str, Any]) -> str:
     head = (f"{'method':<20}{'start':<11}{'n':>3}"
             f"{'cost to converge, 1e6 steps (95% CI)':>38}"
             f"{'final TV':>10}{'res acc':>9}{'max|z|':>8}{'halves':>8}"
-            f"{'cover':>8}")
+            f"{'starts':>8}{'cover':>8}")
     lines += [head, "-" * len(head)]
-    flagged = []
+    flagged, flagged_res = [], []
     for name, m in summary["methods"].items():
         acc = "" if m["reservoir_acceptance"] is None \
             else f"{m['reservoir_acceptance']:.2f}"
@@ -838,6 +904,16 @@ def format_summary(summary: dict[str, Any]) -> str:
             else f"{m['reservoir_check_z_max_abs']:.1f}"
         halves = "" if m["reservoir_halves_tv_mean"] is None \
             else f"{m['reservoir_halves_tv_mean']:.3f}"
+        rs = m.get("reservoir_starts_tv")
+        rz = m.get("reservoir_starts_z") or []
+        starts_tv = "" if not rs else f"{float(np.max(rs)):.3f}"
+        n_bad = sum(v > RESERVOIR_Z for v in rz)
+        if n_bad:
+            starts_tv += "!"
+            flagged_res.append(
+                f"{name}: reservoirs from opposite starts differ beyond "
+                f"their noise (|z| > {RESERVOIR_Z:g}) for {n_bad} of "
+                f"{len(rz)} seeds, by up to TV {max(rs):.3f}")
         cover = "" if m.get("coverage_z_max_abs") is None \
             else f"{m['coverage_z_max_abs']:.1f}"
         if m.get("coverage_unsupported_states"):
@@ -864,8 +940,8 @@ def format_summary(summary: dict[str, Any]) -> str:
             lines.append(
                 f"{name if i == 0 else '':<20}{start:<11}{s['runs']:>3}"
                 f"{ci:>38}{ftv:>10}"
-                + (f"{acc:>9}{z:>8}{halves:>8}{cover:>8}" if i == 0
-                   else ""))
+                + (f"{acc:>9}{z:>8}{halves:>8}{starts_tv:>8}{cover:>8}"
+                   if i == 0 else ""))
     if summary.get("mbar"):
         lines += ["", "With every temperature, by MBAR:",
                   f"{'method':<20}{'start':<11}"
@@ -883,7 +959,10 @@ def format_summary(summary: dict[str, Any]) -> str:
                 lines.append(f"{name if i == 0 else '':<20}{start:<11}"
                              f"{ci:>38}{ftv:>10}")
     lines += ["", "max|z|: reservoir temperature check; halves: TV between "
-              "the reservoir's halves; cover: coverage check, max |z| over "
-              "states ('!': a state missing from the reservoir)"]
+              "the reservoir's halves; starts: largest TV between a seed's "
+              "reservoirs from opposite starts ('!': beyond their noise); "
+              "cover: coverage check, max |z| over states ('!': a state "
+              "missing from the reservoir)"]
+    lines += ["RESERVOIRS DISAGREE: " + f for f in flagged_res]
     lines += ["MISSING STATE: " + f for f in flagged]
     return "\n".join(lines)

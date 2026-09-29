@@ -121,6 +121,12 @@ from opposite starts. It needs no reference.
   halves. They differ when its simulation had not converged.
 - **Lineage.** Acceptance, the fraction of lowest-temperature samples
   descended from the reservoir, and the effective number of ancestors.
+- **Reservoir agreement.** The distance between a seed's reservoirs made
+  from opposite starts (`starts` in the table). `!` marks a pair that
+  differs beyond its noise (|z| above 4, from ten-block standard errors,
+  which understate the noise of a reservoir with only a few transitions).
+  It needs no runs and no reference, and it catches a reservoir that never
+  left its start, which every check on a single run misses.
 - **Coverage.** The top replica's state populations against the
   reservoir's, reweighted to the top temperature (max |z| over states).
   A state the top replica visits but the reservoir never holds is flagged
@@ -129,7 +135,9 @@ from opposite starts. It needs no reference.
 
 A reservoir with a state entirely missing passes the temperature check,
 the halves and agreement between starts; in tier 1 only the reference and
-the coverage check expose it.
+the coverage check expose it. A reservoir that never crosses a barrier
+passes coverage too, since the top replica never crosses it either; in
+tier 1b only runs and reservoirs from opposite starts expose it.
 
 ## Specs
 
@@ -223,5 +231,6 @@ Subclass `BenchSystem` in `resbench/systems.py` and register it in
 | `convergence.csv` | per run: convergence time and cost, final error, exchange and reservoir diagnostics, coverage |
 | `agreement.csv` | per method, seed and time: distance between starts |
 | `reservoirs.csv` | per reservoir: populations, halves distance, cost |
+| `reservoir_agreement.csv` | per method and seed: distance between reservoirs from opposite starts |
 | `figures/` | from `plots/plot_benchmark.py`: convergence, cost to converge, populations, agreement |
 | `summary.json` | per method: medians with intervals, final populations, the reference |
