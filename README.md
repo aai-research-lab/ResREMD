@@ -156,17 +156,24 @@ upper bound, and not as proof that the reservoir is converged.
 - **Reservoir length.** The reservoir's own simulation is usually most of
   the cost, and it only needs to be long enough to have converged at its
   temperature. Name the torsions of the slow change and a tolerance, and
-  the build stops once the histograms of its two halves agree, with
-  `duration_ns` as the most it may take:
+  the build stops once the populations of its two halves agree and every
+  watched torsion has crossed between basins (wells separated by at least
+  2 kT in its own sampled free energy) at least
+  `convergence_min_transitions` times (10 by default), with `duration_ns`
+  as the most it may take:
   ```
   resremd reservoir generate --prepared setup --temperature-K 450 \
       --duration-ns 200 --convergence-torsions "[4, 6, 8, 10]" \
       --convergence-tv 0.02 --output reservoir
   ```
-  The history of the test is in `reservoir.json`. Halves that agree are
-  necessary, not sufficient: a simulation that never leaves its first
-  state agrees with itself. Build two reservoirs from different starts and
-  compare them to rule that out.
+  The history of the test, and each torsion's transitions, are in
+  `reservoir.json`. The transitions stop a build stuck in its first basin
+  from passing as converged; such a build runs to its full length and
+  says so. Watch torsions with real barriers (a proline omega, a backbone
+  phi): one without a 2 kT barrier never counts a transition and keeps
+  the build going. A state the build never found at all is beyond any test of the
+  build itself: build two reservoirs from different starts and compare
+  them.
 - **Exchange interval.** 500 steps (1 ps at 2 fs) by default, as
   `-replex 500` in GROMACS.
 - **Ensemble.** Constant volume is usual for explicit-solvent temperature

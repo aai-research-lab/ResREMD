@@ -340,18 +340,33 @@ CONVERGENCE_TV = Option(
     "Stop the build once the halves of every `convergence_torsions` "
     "histogram agree within this total variation distance, at two checks "
     "in a row (checks come with each checkpoint, about every 500 ps), and "
-    "keep `duration_ns` as the most it may take. Agreeing halves are "
-    "necessary, not sufficient: a simulation that never leaves its first "
-    "state agrees with itself too. Build from two different starts and "
-    "compare them to rule that out.",
+    "every watched torsion has made `convergence_min_transitions` "
+    "transitions; `duration_ns` is the most it may take. Agreeing halves "
+    "are necessary, not sufficient: the transitions rule out a build stuck "
+    "in its first state, but not one that never found a state at all. "
+    "Building from two different starts and comparing them covers that.",
     group="Run length", minimum=0.0, maximum=1.0, minimum_exclusive=True,
     example=0.02)
 
 CONVERGENCE_BINS = Option(
     "convergence_bins", int, 6,
-    "Bins per torsion for the convergence histograms (60 degrees each by "
-    "default). Fewer bins need fewer frames for the same distance.",
+    "Regions per torsion for the halves test: equal arcs, centred on 0 and "
+    "180 degrees when their number is even (60 degrees each by default). "
+    "Fewer regions need fewer frames for the same distance.",
     group="Run length", minimum=2)
+
+CONVERGENCE_MIN_TRANSITIONS = Option(
+    "convergence_min_transitions", int, 10,
+    "Transitions that every watched torsion must have made before the build "
+    "may stop. Basins are found from the torsion's own sampled free energy "
+    "(reweighted, under a bias), as wells separated by barriers of at least "
+    "2 kT, and a transition is a move from one basin's core to another's; "
+    "motion within a basin, however wide, never counts. Halves that agree "
+    "mean little for a torsion that never crossed a barrier: without this, "
+    "a build stuck in its first basin would stop at once. A torsion with no "
+    "such barrier (a fast one, or one stuck) keeps the build going to "
+    "`duration_ns`. 0 turns the requirement off.",
+    group="Run length", minimum=0)
 
 TRAJECTORIES = Option(
     "trajectories", list, None,
@@ -420,7 +435,8 @@ GENERATE = Schema(
         PREPARED, OUTPUT_RESERVOIR, RESUME,
         RESERVOIR_TEMPERATURE, FRAME_INTERVAL, BIAS_TORSIONS,
         RESERVOIR_DURATION, RESERVOIR_EQUILIBRATION, CONVERGENCE_TORSIONS,
-        CONVERGENCE_TV, CONVERGENCE_BINS, MINIMIZE,
+        CONVERGENCE_TV, CONVERGENCE_BINS, CONVERGENCE_MIN_TRANSITIONS,
+        MINIMIZE,
         INTEGRATOR, TIMESTEP, FRICTION, ENSEMBLE, PRESSURE,
         BAROSTAT_FREQUENCY, RANDOM_SEED,
         PLATFORM, PRECISION, DEVICE_INDEX, CPU_THREADS,

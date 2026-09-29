@@ -228,7 +228,8 @@ def test_a_build_stops_once_its_halves_agree(tmp_path):
                                       output=str(tmp_path / "r"), **CONVERGE)
     conv = meta["convergence"]
     assert conv["converged"] and meta["n_frames"] < 40000
-    assert all(v <= 0.03 for _, v in conv["history"][-2:])
+    assert all(h[1] <= 0.03 and h[2] >= 10 for h in conv["history"][-2:])
+    assert min(conv["transitions"]) >= 10
     assert meta["cost"]["md_steps"]["production"] == meta["n_frames"] * 500
     res = Reservoir.open(tmp_path / "r")
     assert res.positions.shape[0] == len(res.weights) == meta["n_frames"]
@@ -254,7 +255,7 @@ def test_a_stopped_convergence_build_resumes(tmp_path):
                                       output=str(tmp_path / "r"), resume=True,
                                       **CONVERGE)
     # The check made before the stop (at frame 500) is kept.
-    frames = [f for f, _ in meta["convergence"]["history"]]
+    frames = [h[0] for h in meta["convergence"]["history"]]
     assert meta["complete"] and frames[0] == 500
     assert frames == sorted(set(frames))
 
@@ -332,4 +333,82 @@ def test_a_stop_request_is_not_a_convergence_check(tmp_path, monkeypatch):
 
         saved = json.loads(str(data["meta"]))
     assert saved["frames"] == 501
-    assert [f for f, _ in saved["convergence_history"]] == [500]
+    assert [h[0] for h in saved["convergence_history"]] == [500]
+
+
+def test_regions_are_centred_on_cis_and_trans():
+    from resremd.build import torsion_regions
+
+    # With an even number of regions, 0 and 180 are centres.
+    r = torsion_regions(np.array([179.0, -179.0, 1.0, -1.0]), 6)
+    assert r[0] == r[1] and r[2] == r[3] and r[0] != r[2]
+
+
+def _ar(rng, centre, sd, n=4000, rho=0.9):
+    x = np.zeros(n)
+    e = rng.normal(0.0, sd * np.sqrt(1 - rho ** 2), n)
+    for i in range(1, n):
+        x[i] = rho * x[i - 1] + e[i]
+    return (centre + x + 180.0) % 360.0 - 180.0
+
+
+def test_motion_within_one_basin_is_not_a_transition():
+    """A broad well, wherever it sits (on a region boundary too), counts no
+    transitions, however much it wanders."""
+    from resremd.build import basin_transitions
+
+    rng = np.random.default_rng(2)
+    for centre, sd in ((150.0, 15.0), (-150.0, 15.0), (-40.0, 15.0),
+                       (180.0, 20.0), (-100.0, 30.0)):
+        assert basin_transitions(_ar(rng, centre, sd)) == [0], centre
+
+
+def test_hops_between_basins_are_counted():
+    from resremd.build import basin_transitions
+
+    rng = np.random.default_rng(3)
+    parts, state = [], 180.0
+    for _ in range(12):
+        parts.append(_ar(rng, state, 10.0, n=100))
+        state = 0.0 if state == 180.0 else 180.0
+    assert basin_transitions(np.concatenate(parts)) == [11]
+
+
+def test_basins_from_biased_frames_use_the_weights():
+    """Under a bias that flattens the barrier the frames spread evenly; the
+    weights restore the barrier, and with it the two basins."""
+    from resremd.build import basin_transitions, bias_weights
+
+    phi = np.linspace(-180.0, 180.0, 20000, endpoint=False)
+    rng = np.random.default_rng(4)
+    rng.shuffle(phi)
+    phi = np.sort(phi.reshape(200, 100), axis=1).ravel()  # sweeps
+    bias = -80.0 * np.sin(np.radians(phi)) ** 2
+    assert basin_transitions(phi) == [0]
+    assert basin_transitions(phi, weights=bias_weights(bias, 520.0))[0] > 10
+
+
+def test_a_build_stuck_in_its_start_does_not_stop(tmp_path):
+    """Without a bias the torsion never crosses at 300 K: its halves agree
+    at once, but with no transitions the build runs to its full length."""
+    meta = resremd.generate_reservoir(
+        testsystems.torsion_model(), output=str(tmp_path / "r"),
+        temperature_K=300.0, duration_ns=3.0, frame_interval_steps=500,
+        equilibration_ns=0.0, friction_per_ps=5.0, platform="Reference",
+        random_seed=4, minimize=False, convergence_torsions=[[0, 1, 2, 3]],
+        convergence_tv=0.05)
+    conv = meta["convergence"]
+    assert not conv["converged"] and conv["transitions"] == [0]
+    assert meta["n_frames"] == 3000
+    assert all(h[1] <= 0.05 for h in conv["history"])   # halves agree
+
+
+def test_a_build_started_before_the_transition_rule_resumes():
+    from resremd.build import _same_convergence
+
+    now = {"torsions": [[0, 1, 2, 3]], "tv": 0.02, "bins": 6,
+           "min_transitions": 10}
+    old = {k: v for k, v in now.items() if k != "min_transitions"}
+    assert _same_convergence(old, now)
+    assert not _same_convergence({**old, "tv": 0.05}, now)
+    assert not _same_convergence(None, now) and _same_convergence(None, None)

@@ -94,8 +94,8 @@ def generate(prepared: Prepared | str | Path | None = None, *,
                 or meta["source"].get("timestep_fs") != dt \
                 or meta["temperature_K"] != t \
                 or meta["source"].get("bias_torsions") != biases \
-                or meta["source"].get("convergence") != _convergence_source(
-                    o, watch):
+                or not _same_convergence(meta["source"].get("convergence"),
+                                         _convergence_source(o, watch)):
             raise ResumeError(
                 "The build in progress was started with a different "
                 "temperature, length, frame interval, time step, bias or "
@@ -265,10 +265,15 @@ def generate(prepared: Prepared | str | Path | None = None, *,
                     tv = halves_tv(angles[:done], o["convergence_bins"],
                                    None if bias_energy is None else
                                    bias_weights(bias_energy[:done], t))
-                    history.append([done, tv])
+                    moves = basin_transitions(
+                        angles[:done], weights=None if bias_energy is None
+                        else bias_weights(bias_energy[:done], t))
+                    history.append([done, tv, int(min(moves))])
                     logger.info("halves of the watched torsions differ by "
-                                "TV %.3f", tv)
-                    converged = _converged(history, o["convergence_tv"])
+                                "TV %.3f; fewest transitions %d", tv,
+                                min(moves))
+                    converged = _converged(history, o["convergence_tv"],
+                                           o["convergence_min_transitions"])
                 elif angles is not None:
                     angles.flush()
                 _save_build_checkpoint(
@@ -317,13 +322,31 @@ def generate(prepared: Prepared | str | Path | None = None, *,
         bias_energy = np.load(out / "build_bias_kjmol.npy") if biases \
             else None
     if watch:
+        moves = basin_transitions(
+            np.load(out / "build_torsions_deg.npy"),
+            weights=None if bias_energy is None
+            else bias_weights(np.asarray(bias_energy), t))
+        done_ok = _converged(history, o["convergence_tv"],
+                             o["convergence_min_transitions"])
         meta["convergence"] = {
-            "history": [[int(f), float(v)] for f, v in history],
+            "history": [[int(h[0]), float(h[1])] + [int(x) for x in h[2:]]
+                        for h in history],
             "halves_tv": float(history[-1][1]) if history else None,
-            "converged": _converged(history, o["convergence_tv"]),
+            "transitions": [int(x) for x in moves],
+            "converged": done_ok,
             "frames": int(n_frames),
             "ns": n_frames * interval * dt / 1e6,
         }
+        if o["convergence_tv"] is not None and not done_ok and \
+                min(moves) < o["convergence_min_transitions"]:
+            logger.warning(
+                "A watched torsion made only %d transitions between basins "
+                "(%d needed), so the build ran to its full length. Either it "
+                "stayed in one basin, and the reservoir has not sampled its "
+                "other states (a bias on it may help), or its states are not "
+                "separated by a barrier of 2 kT at this temperature, and it "
+                "is not a slow torsion worth watching.", min(moves),
+                o["convergence_min_transitions"])
     g = statistical_inefficiency(np.asarray(potential))
     meta["statistics"] = {
         "potential_mean_kjmol": float(np.mean(potential)),
@@ -395,13 +418,31 @@ def _convergence_source(o, watch) -> dict[str, Any] | None:
     if not watch:
         return None
     return {"torsions": watch, "tv": o["convergence_tv"],
-            "bins": o["convergence_bins"]}
+            "bins": o["convergence_bins"],
+            "min_transitions": o["convergence_min_transitions"]}
 
 
-def _converged(history: list, threshold: float | None) -> bool:
-    """Two checks in a row within the threshold."""
+def _same_convergence(saved: dict | None, now: dict | None) -> bool:
+    """The convergence test of a build in progress, against the one asked
+    for. Builds started before the transition requirement existed carry no
+    `min_transitions`, and take the one asked for."""
+    if saved is None or now is None:
+        return saved == now
+    if "min_transitions" not in saved:
+        saved = {**saved, "min_transitions": now["min_transitions"]}
+    return saved == now
+
+
+def _converged(history: list, threshold: float | None,
+               min_transitions: int = 0) -> bool:
+    """Two checks in a row within the threshold, with every watched torsion
+    having made enough transitions by then."""
+    def ok(h):
+        moves = h[2] if len(h) > 2 else 0
+        return h[1] <= threshold and moves >= min_transitions
+
     return threshold is not None and len(history) >= 2 and all(
-        v <= threshold for _, v in history[-2:])
+        ok(h) for h in history[-2:])
 
 
 def torsion_angles_deg(positions: np.ndarray, torsions: list[list[int]]
@@ -419,22 +460,114 @@ def torsion_angles_deg(positions: np.ndarray, torsions: list[list[int]]
     return np.degrees(np.arctan2(y, x))
 
 
+def torsion_regions(angles_deg: np.ndarray, bins: int) -> np.ndarray:
+    """The region of each angle: ``bins`` equal arcs, region k centred on
+    -180 + k 360/bins degrees. With an even number of regions, 0 and 180
+    are centres, never boundaries."""
+    a = np.asarray(angles_deg, dtype=float)
+    width = 360.0 / bins
+    return np.floor((a + 180.0 + width / 2) / width).astype(int) % bins
+
+
+def torsion_basins(angles_deg: np.ndarray, weights: np.ndarray | None = None,
+                   *, bins: int = 36, depth: float = 2.0,
+                   min_population: float = 0.01) -> tuple[np.ndarray, list]:
+    """The basins of one torsion's free energy F = -ln p, in kT of the
+    sampled temperature (with the weights, of the unbiased system).
+
+    ``bins`` arcs are grouped by steepest descent on the lightly smoothed F
+    into basins; neighbours whose barrier, from the shallower side, is below
+    ``depth`` kT are merged, and arcs never visited separate basins
+    outright. Each arc's label is its basin's (-1: unvisited, or a basin
+    holding less than ``min_population`` of the weight), and the returned
+    list holds each basin's core: its arcs within depth/2 of its minimum.
+    """
+    a = np.asarray(angles_deg, dtype=float)
+    w = np.ones(len(a)) if weights is None else np.asarray(weights, float)
+    width = 360.0 / bins
+    idx = np.floor((a + 180.0) / width).astype(int) % bins
+    p = np.bincount(idx, weights=w, minlength=bins)
+    visited = p > 0
+    p = (np.roll(p, 1) + p + np.roll(p, -1)) / 3.0
+    with np.errstate(divide="ignore"):
+        f = np.where(visited, -np.log(np.maximum(p, 1e-300) / p.sum()),
+                     np.inf)
+    label = np.full(bins, -1)
+    for b in np.flatnonzero(visited):
+        c = b
+        while True:
+            left, right = (c - 1) % bins, (c + 1) % bins
+            nxt = min((f[left], left), (f[c], c), (f[right], right))[1]
+            if nxt == c or f[nxt] >= f[c]:
+                break
+            c = nxt
+        label[b] = c
+    # Merge neighbouring basins across barriers lower than `depth`.
+    while True:
+        best = None
+        for b in range(bins):
+            n = (b + 1) % bins
+            la, lb = label[b], label[n]
+            if la < 0 or lb < 0 or la == lb:
+                continue
+            barrier = max(f[b], f[n]) - max(f[la], f[lb])
+            if barrier < depth and (best is None or barrier < best[0]):
+                best = (barrier, la, lb)
+        if best is None:
+            break
+        _, la, lb = best
+        keep, drop = (la, lb) if f[la] <= f[lb] else (lb, la)
+        label[label == drop] = keep
+    total = p[visited].sum()
+    cores = []
+    for basin in sorted(set(label[label >= 0].tolist())):
+        members = label == basin
+        if p[members & visited].sum() < min_population * total:
+            label[members] = -1
+            continue
+        cores.append(np.flatnonzero(members & (f <= f[basin] + depth / 2)))
+    return label, cores
+
+
+def basin_transitions(angles_deg: np.ndarray, bins: int = 36,
+                      weights: np.ndarray | None = None) -> list[int]:
+    """Per torsion, the moves from one basin's core to another's (basins as
+    in :func:`torsion_basins`). Motion within a basin, however wide, never
+    counts; only crossing a barrier of at least 2 kT does."""
+    a = np.asarray(angles_deg, dtype=float)
+    if a.ndim == 1:
+        a = a[:, None]
+    out = []
+    width = 360.0 / bins
+    for j in range(a.shape[1]):
+        _, cores = torsion_basins(a[:, j], weights, bins=bins)
+        where = np.full(bins, -1)
+        for k, core in enumerate(cores):
+            where[core] = k
+        idx = np.floor((a[:, j] + 180.0) / width).astype(int) % bins
+        seq = where[idx]
+        seq = seq[seq >= 0]
+        out.append(int(np.count_nonzero(seq[1:] != seq[:-1])))
+    return out
+
+
 def halves_tv(angles_deg: np.ndarray, bins: int,
               weights: np.ndarray | None = None) -> float:
     """The largest, over torsions, total variation distance between the
-    histograms of the first and second halves of a series of frames."""
+    region populations of the first and second halves of a series of
+    frames (regions as in :func:`torsion_regions`)."""
     a = np.asarray(angles_deg, dtype=float)
     n = len(a)
     if n < 2:
         return 1.0
     w = np.ones(n) if weights is None else np.asarray(weights, dtype=float)
     half = n // 2
-    edges = np.linspace(-180.0, 180.0, bins + 1)
     worst = 0.0
     for j in range(a.shape[1]):
+        r = torsion_regions(a[:, j], bins)
         h = []
         for sl in (slice(0, half), slice(half, n)):
-            c = np.histogram(a[sl, j], bins=edges, weights=w[sl])[0]
+            c = np.bincount(r[sl], weights=w[sl], minlength=bins)
             h.append(c / c.sum() if c.sum() > 0 else c)
         worst = max(worst, 0.5 * float(np.abs(h[0] - h[1]).sum()))
     return worst
