@@ -17,10 +17,16 @@ solute by s^2, and those reaching outside it by s. Bonds and angles are not
 scaled.
 
 OpenMM does not apply parameter offsets to the long-range dispersion
-correction, so with it on the correction stays unscaled at every state. It
-is the same function of the volume at every state, so sampling and MBAR are
-exact for the Hamiltonian used; at constant pressure the scaled states feel
-the unscaled correction, a small departure from Wang et al.'s Hamiltonian.
+correction. With the correction on, it is moved out of the NonbondedForce
+into a CustomVolumeForce that scales it as the pairs it stands for: the
+solute's own pairs by s^2, its pairs with the solvent by s. Its
+coefficients come from OpenMM's own correction for the solute's well
+depths scaled to s = 1, 0.5 and 0, so at s = 1 it is the original term. At
+constant volume the correction is the same for every configuration of a
+state and cancels from every exchange; at constant pressure it acts on the
+barostat. With an OpenMM older than 8.3, which has no CustomVolumeForce,
+the correction stays unscaled at every state (exact for that Hamiltonian,
+a small departure from Wang et al.'s at constant pressure).
 
 The potential energy of any configuration is then exactly quadratic in s,
 
@@ -88,7 +94,7 @@ def rest2_system(system: Any, solute: np.ndarray) -> tuple[Any, dict]:
         openmm.XmlSerializer.serialize(system))
     info = {"solute_atoms": int(solute.size), "nonbonded": False,
             "torsions_scaled": 0, "torsions_partly_scaled": 0,
-            "exceptions_scaled": 0}
+            "exceptions_scaled": 0, "dispersion_correction": "none"}
     forces = list(system.getForces())
     for f in forces:
         name = f.__class__.__name__
@@ -101,6 +107,7 @@ def rest2_system(system: Any, solute: np.ndarray) -> tuple[Any, dict]:
                 code="resremd.input.rest2")
     for f in forces:
         if isinstance(f, openmm.NonbondedForce):
+            _scale_dispersion_correction(system, f, hot, info)
             _scale_nonbonded(f, hot, info)
     for index in reversed(range(system.getNumForces())):
         f = system.getForce(index)
@@ -151,6 +158,79 @@ def _scale_nonbonded(f: Any, hot: np.ndarray, info: dict) -> None:
             continue
         info["exceptions_scaled"] += 1
     info["nonbonded"] = True
+
+
+#: Nonbonded methods with a dispersion correction (LJPME has none).
+_CORRECTED = ("CutoffPeriodic", "Ewald", "PME")
+
+
+def dispersion_coefficient(force: Any, epsilon_scale: np.ndarray) -> float:
+    """OpenMM's dispersion correction of ``force`` times the box volume
+    (kJ/mol nm^3), with each particle's well depth multiplied by
+    ``epsilon_scale``.
+
+    Found from a copy of the particles spaced wider than the cutoff with no
+    charges, so no pair is within the cutoff and the energy is the
+    correction alone.
+    """
+    import openmm
+
+    n = force.getNumParticles()
+    cutoff = force.getCutoffDistance()._value
+    probe = openmm.NonbondedForce()
+    probe.setNonbondedMethod(openmm.NonbondedForce.CutoffPeriodic)
+    probe.setCutoffDistance(cutoff)
+    probe.setUseSwitchingFunction(force.getUseSwitchingFunction())
+    probe.setSwitchingDistance(force.getSwitchingDistance())
+    probe.setUseDispersionCorrection(True)
+    system = openmm.System()
+    for i in range(n):
+        _q, sigma, eps = force.getParticleParameters(i)
+        system.addParticle(1.0)
+        probe.addParticle(0.0, sigma, eps * float(epsilon_scale[i]))
+    system.addForce(probe)
+    side = int(np.ceil(n ** (1.0 / 3.0)))
+    spacing = 1.1 * cutoff
+    length = max(side * spacing, 2.2 * cutoff)
+    system.setDefaultPeriodicBoxVectors(openmm.Vec3(length, 0, 0),
+                                        openmm.Vec3(0, length, 0),
+                                        openmm.Vec3(0, 0, length))
+    grid = np.indices((side, side, side)).reshape(3, -1).T[:n] * spacing
+    context = openmm.Context(system, openmm.VerletIntegrator(0.001),
+                             openmm.Platform.getPlatformByName("Reference"))
+    context.setPositions(grid)
+    energy = context.getState(getEnergy=True).getPotentialEnergy()._value
+    return energy * length ** 3
+
+
+def _scale_dispersion_correction(system: Any, f: Any, hot: np.ndarray,
+                                 info: dict) -> None:
+    import openmm
+
+    method = f.getNonbondedMethod()
+    if not f.getUseDispersionCorrection() or not any(
+            method == getattr(openmm.NonbondedForce, m) for m in _CORRECTED):
+        return
+    if not any(f.getParticleParameters(int(i))[2]._value != 0.0
+               for i in np.flatnonzero(hot)):
+        info["dispersion_correction"] = "unchanged"
+        return
+    if not hasattr(openmm, "CustomVolumeForce"):
+        info["dispersion_correction"] = "unscaled"
+        return
+    # E(s) = (c2 s^2 + c1 s + c0) / V, through three scales.
+    values = [dispersion_coefficient(f, np.where(hot, s * s, 1.0))
+              for s in (1.0, 0.5, 0.0)]
+    c2, c1, c0 = fit([1.0, 0.5, 0.0], values)
+    volume = openmm.CustomVolumeForce(
+        f"({c2!r}*{LAMBDA} + {c1!r}*{S} + {c0!r})/v")
+    volume.setName("REST2 dispersion correction")
+    volume.addGlobalParameter(LAMBDA, 1.0)
+    volume.addGlobalParameter(S, 1.0)
+    volume.setForceGroup(f.getForceGroup())
+    system.addForce(volume)
+    f.setUseDispersionCorrection(False)
+    info["dispersion_correction"] = "scaled"
 
 
 def _new_torsion_force(expression: str, parameter: str, names: list[str],

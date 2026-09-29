@@ -231,6 +231,9 @@ class _Run:
             solute = select_atoms(self.prepared.topology,
                                   o["rest2_selection"], o["rest2_atoms"])
             system, info = rest2_system(system, solute)
+            # What the replicas simulate, for keys of energies computed with
+            # it: the scaled System changes with this package's version.
+            info["system_sha256"] = system_digest(system)
             self.T0 = self.temperatures[0]
             self.beta0 = beta(self.T0)
             self.scales = [scale_of(self.T0, t) for t in self.temperatures]
@@ -268,6 +271,13 @@ class _Run:
             frequency=o["barostat_frequency"])
         self.system = system
         self.ensemble = ensemble
+        if self.rest2 is not None and ensemble.constant_pressure and \
+                self.rest2["dispersion_correction"] == "unscaled":
+            self.warnings.append(
+                "This OpenMM has no CustomVolumeForce (8.3 and later), so "
+                "the dispersion correction is not scaled with the solute: "
+                "the barostat of every REST2 state feels the unscaled one. "
+                "Update OpenMM to scale it.")
         if self.reservoir is not None:
             self.warnings += self.reservoir.check_against(
                 topology_sha256=self.topology_sha256,
@@ -292,6 +302,11 @@ class _Run:
                 "frames_sha256": self.reservoir.content_digest()}),
             "rest2_solute": None if self.rest2 is None
             else self.rest2["solute_sha256"],
+            # The scaled dispersion correction changes sampling only through
+            # the barostat.
+            "rest2_dispersion": self.rest2["dispersion_correction"]
+            if self.rest2 is not None and ensemble.constant_pressure
+            and self.rest2["dispersion_correction"] == "scaled" else None,
             **{k: (self.temperatures if k == "temperatures_K" else
                    self.plan["trajectory_interval_steps"]
                    if k == "trajectory_interval_steps" else
@@ -390,7 +405,8 @@ class _Run:
                         if self.engine.platform in ("CUDA", "HIP", "OpenCL")
                         else None,
                         "openmm": openmm.__version__,
-                        **({"rest2": self.rest2["solute_sha256"]}
+                        **({"rest2": self.rest2["solute_sha256"],
+                            "rest2_system": self.rest2["system_sha256"]}
                            if rest2 else {})},
             progress=logger.info, terms=rest2)
         pot = energies["potential_kjmol"]
@@ -518,7 +534,7 @@ class _Run:
         before = meta["fingerprint"]
         # Settings added since a run was started read as their defaults.
         added = {"rest2": False, "reservoir_reweight": False,
-                 "rest2_solute": None}
+                 "rest2_solute": None, "rest2_dispersion": None}
         differ = [k for k in self.fingerprint
                   if json.dumps(before.get(k, added.get(k)), sort_keys=True)
                   != json.dumps(self.fingerprint[k], sort_keys=True)]

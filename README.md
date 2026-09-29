@@ -144,7 +144,10 @@ The exchange is the general independence move
 
 with u the reduced potential of the top state and of the reservoir, which
 for temperature REMD is the criterion above. REST2 needs a NonbondedForce:
-explicit solvent or vacuum, not implicit-solvent GB.
+explicit solvent or vacuum, not implicit-solvent GB. The long-range
+dispersion correction is scaled with the solute like the pairs it stands
+for (with OpenMM 8.3 or later), so at constant pressure every state's
+barostat feels its own Hamiltonian.
 
 ### What is checked before a run starts
 

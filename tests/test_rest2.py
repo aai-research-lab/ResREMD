@@ -57,6 +57,38 @@ def test_energy_is_quadratic_in_the_scale_and_exact_at_one():
     terms = rest2.fit([1.0, 0.0, 0.5], [u(1.0), u(0.0), u(0.5)])
     for s in (0.3, 0.7, 0.9):
         assert rest2.energy(terms, s) == pytest.approx(u(s), abs=1e-2)
+    if hasattr(openmm, "CustomVolumeForce"):
+        assert info["dispersion_correction"] == "scaled"
+        _check_dispersion_correction(system, scaled, solute, x)
+
+
+def _check_dispersion_correction(system, scaled, solute, x):
+    """The scaled correction is OpenMM's own for the solute's well depths
+    scaled by s^2."""
+    def energy(sys_, s=None, groups=-1):
+        ctx = _context(sys_)
+        ctx.setPositions(x)
+        if s is not None:
+            rest2.set_scale(ctx, s)
+        return ctx.getState(getEnergy=True, groups=groups
+                            ).getPotentialEnergy()._value
+
+    volume = [f for f in scaled.getForces()
+              if f.getName() == "REST2 dispersion correction"]
+    assert len(volume) == 1
+    volume[0].setForceGroup(31)
+    for s in (0.8, 0.35):
+        ref = openmm.XmlSerializer.deserialize(
+            openmm.XmlSerializer.serialize(system))
+        nb = [f for f in ref.getForces()
+              if isinstance(f, openmm.NonbondedForce)][0]
+        for i in solute:
+            q, sigma, eps = nb.getParticleParameters(int(i))
+            nb.setParticleParameters(int(i), q, sigma, eps * s * s)
+        on = energy(ref)
+        nb.setUseDispersionCorrection(False)
+        assert energy(scaled, s, groups={31}) == pytest.approx(
+            on - energy(ref), abs=1e-6)
 
 
 def test_unscalable_solute_forces_are_refused():
@@ -182,3 +214,58 @@ def test_a_rest2_reservoir_needs_a_rest2_run(tmp_path):
                     production_steps=100, exchange_interval_steps=50,
                     platform="Reference", equilibration_ns=0.0,
                     minimize=False)
+
+
+def test_constant_pressure_rest2_scales_the_dispersion_correction(tmp_path):
+    """At constant pressure the scaled correction acts on the barostat, so a
+    run begun with it unscaled is not resumed with it scaled."""
+    if not hasattr(openmm, "CustomVolumeForce"):
+        pytest.skip("needs OpenMM 8.3 or later")
+    common = dict(rest2=True, rest2_atoms=list(range(20)),
+                  temperatures_K=[100.0, 150.0], exchange_interval_steps=50,
+                  timestep_fs=4.0, platform="Reference", random_seed=1,
+                  equilibration_ns=0.0, save_selection="all")
+    run = tmp_path / "run"
+    m = resremd.run(testsystems.lj_box(pressure=True), output=str(run),
+                    production_steps=100, **common)
+    assert m["rest2"]["dispersion_correction"] == "scaled"
+    chk = run / "checkpoint.npz"
+    with np.load(chk) as data:
+        arrays = {k: np.array(data[k]) for k in data.files}
+    meta = json.loads(str(arrays["meta"]))
+    assert meta["fingerprint"].pop("rest2_dispersion") == "scaled"
+    arrays["meta"] = np.array(json.dumps(meta))
+    np.savez(chk, **arrays)
+    with pytest.raises(resremd.errors.ResumeError, match="rest2_dispersion"):
+        resremd.run(testsystems.lj_box(pressure=True), output=str(run),
+                    production_steps=200, resume=True, **common)
+
+
+def test_reservoir_energies_are_not_reused_across_rest2_systems(
+        tmp_path, monkeypatch):
+    """The cache of a reservoir's REST2 energies is keyed by the scaled
+    System itself: one built with another scaling is never reused."""
+    if not hasattr(openmm, "CustomVolumeForce"):
+        pytest.skip("needs OpenMM 8.3 or later")
+    rng = np.random.default_rng(0)
+    base = testsystems.lj_box()
+    frames = base.positions[None] + rng.normal(0, 0.01, (20, 125, 3))
+    from resremd.reservoir import write_reservoir
+
+    write_reservoir(tmp_path / "r", topology=base.topology, positions=frames,
+                    kind="boltzmann", temperature_K=200.0,
+                    box=np.repeat(base.box[None], 20, axis=0))
+    common = dict(rest2=True, rest2_atoms=list(range(20)),
+                  temperatures_K=[100.0, 150.0], exchange_interval_steps=50,
+                  production_steps=50, timestep_fs=4.0, platform="Reference",
+                  random_seed=1, equilibration_ns=0.0, save_selection="all",
+                  reservoir=str(tmp_path / "r"))
+    real = rest2._scale_dispersion_correction
+    monkeypatch.setattr(rest2, "_scale_dispersion_correction",
+                        lambda *a: None)
+    resremd.run(testsystems.lj_box(), output=str(tmp_path / "old"), **common)
+    monkeypatch.setattr(rest2, "_scale_dispersion_correction", real)
+    resremd.run(testsystems.lj_box(), output=str(tmp_path / "new"), **common)
+    old = np.load(tmp_path / "old/reservoir_delta.npy")
+    new = np.load(tmp_path / "new/reservoir_delta.npy")
+    assert np.ptp(new - old) < 1e-6 and abs(np.mean(new - old)) > 0.1
