@@ -162,7 +162,8 @@ def build_parser() -> argparse.ArgumentParser:
                     "--n-replicas; or, with --from-pilot, the fewest "
                     "temperatures that give every neighbour pair the target "
                     "acceptance, predicted from a pilot run's energies "
-                    "(within the pilot's range).")
+                    "(within the pilot's range). A REST2 pilot gives a REST2 "
+                    "ladder of effective temperatures.")
     p_lad.add_argument("--temperature-min-K", type=float)
     p_lad.add_argument("--temperature-max-K", type=float)
     p_lad.add_argument("--n-replicas", type=int)
@@ -208,6 +209,9 @@ def main(argv: list[str] | None = None) -> int:
                                temperature_min_K=args.temperature_min_K,
                                temperature_max_K=args.temperature_max_K,
                                target_acceptance=args.target_acceptance)
+                if r["rest2"]:
+                    print("REST2: effective temperatures of the solute; every "
+                          f"replica runs at {r['temperatures_K'][0]:.2f} K")
                 print("pilot ladder: predicted against observed acceptance")
                 for a, b, p, o in zip(r["pilot_temperatures_K"],
                                       r["pilot_temperatures_K"][1:],

@@ -26,8 +26,8 @@ methods:
                  bias_torsions: [{atoms: omega, energy: "-k*sin(theta)^2",
                                   parameters: {k: 60.0}}]}
   # REST2 heats only the solute, so a few replicas span a wide range.
-  # A short CPU pilot gave 15 to 45 percent neighbour acceptance; pilot it
-  # longer on a GPU before a production run.
+  # A short CPU pilot gave 15 to 45 percent neighbour acceptance. Tune it
+  # on a longer pilot with `resremd ladder --from-pilot`.
   - name: rest2
     temperatures_K: [300.0, 417.0, 580.0, 806.0, 1121.0, 1558.0, 2166.0,
                      3000.0]

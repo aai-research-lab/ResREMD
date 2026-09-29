@@ -184,7 +184,10 @@ explicit solvent or vacuum, not implicit-solvent GB.
   This prints the fewest temperatures that give every neighbour pair the
   target, with the acceptance it predicts for each, and for the pilot's own
   ladder the predicted against the observed acceptance as a check. It
-  cannot place rungs outside the pilot's range.
+  cannot place rungs outside the pilot's range. A REST2 pilot gives a REST2
+  ladder, in effective temperatures from the pilot's run temperature; on
+  the torsion model its predictions match the acceptance then observed on
+  the tuned ladder within 0.03.
 - **Reservoir temperature.** Hot enough that barriers are crossed readily in
   the reservoir simulation, and close enough to the top replica that frames
   are accepted. Leaving `temperature_max_K` out places the reservoir one
