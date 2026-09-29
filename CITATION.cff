@@ -1,11 +1,11 @@
 cff-version: 1.2.0
 message: "If you use this software, please cite the method papers below."
-title: "Reservoir-REMD: reservoir replica exchange molecular dynamics for OpenMM"
+title: "ResREMD: reservoir replica exchange molecular dynamics for OpenMM"
 authors:
   - family-names: Aina
     given-names: Adekunle
 license: MIT
-repository-code: "https://github.com/aai-research-lab/Reservoir-REMD"
+repository-code: "https://github.com/aai-research-lab/ResREMD"
 keywords:
   - molecular dynamics
   - replica exchange

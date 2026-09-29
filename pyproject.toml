@@ -3,7 +3,7 @@ requires = ["setuptools>=64", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "reservoir-remd"
+name = "resremd"
 dynamic = ["version"]
 description = "Reservoir replica exchange molecular dynamics (Res-REMD) for OpenMM"
 readme = "README.md"
@@ -52,8 +52,8 @@ test = ["pytest>=7", "mdtraj>=1.9.7", "pyyaml>=6.0"]
 resremd = "resremd.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/aai-research-lab/Reservoir-REMD"
-Issues = "https://github.com/aai-research-lab/Reservoir-REMD/issues"
+Homepage = "https://github.com/aai-research-lab/ResREMD"
+Issues = "https://github.com/aai-research-lab/ResREMD/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]

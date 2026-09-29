@@ -1,4 +1,4 @@
-# Reservoir-REMD
+# ResREMD
 
 Reservoir replica exchange molecular dynamics (Res-REMD) for OpenMM, on CPUs
 and GPUs.
@@ -26,7 +26,7 @@ Python 3.10 or later. The only dependencies are OpenMM and NumPy.
 ```
 conda create -n resremd -c conda-forge python=3.12 openmm numpy mdtraj
 conda activate resremd
-pip install git+https://github.com/aai-research-lab/Reservoir-REMD
+pip install git+https://github.com/aai-research-lab/ResREMD
 ```
 
 MDTraj is only needed to import existing trajectories into a reservoir, and

@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Benchmarks for reservoir replica exchange (resremd)"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-dependencies = ["reservoir-remd", "mdtraj>=1.9.7", "pyyaml>=6.0", "numpy"]
+dependencies = ["resremd", "mdtraj>=1.9.7", "pyyaml>=6.0", "numpy"]
 
 [project.optional-dependencies]
 plots = ["matplotlib>=3.5"]

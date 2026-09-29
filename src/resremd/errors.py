@@ -59,5 +59,5 @@ def require(module: str, purpose: str, extra: str):
         raise BackendUnavailable(
             f"{purpose} needs {module}. Install it with "
             f"`conda install -c conda-forge {module}` or "
-            f"`pip install reservoir-remd[{extra}]`."
+            f"`pip install resremd[{extra}]`."
         ) from exc
