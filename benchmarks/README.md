@@ -237,5 +237,5 @@ Subclass `BenchSystem` in `resbench/systems.py` and register it in
 | `agreement.csv` | per method, seed and time: distance between starts |
 | `reservoirs.csv` | per reservoir: populations, halves distance, cost |
 | `reservoir_agreement.csv` | per method and seed: distance between reservoirs from opposite starts |
-| `figures/` | from `plots/plot_benchmark.py`: convergence, cost to converge, populations, agreement |
+| `figures/` | from `plots/plot_benchmark.py`: convergence (and by MBAR), cost to converge, populations, agreement, reservoir budget |
 | `summary.json` | per method: medians with intervals, final populations, the reference |

@@ -7,10 +7,15 @@ Reads <benchmark-dir>/analysis/ (from `resbench analyze`) and writes, to
 
     convergence.*       population error against cost, one panel per start:
                         median over seeds, band from lowest to highest seed
+    convergence_mbar.*  the same, estimated from every temperature by MBAR
+                        (when the analysis ran with `mbar: true`)
     cost_to_converge.*  cost until both starts have converged, per method:
                         median and 95% bootstrap interval, every seed shown
     populations.*       final populations per method against the reference
     agreement.*         distance between runs from opposite starts
+    reservoir_budget.*  cost to converge, and the distance between the
+                        reservoir's halves, against what the reservoir cost
+                        (when reservoir methods differ in cost)
 
 Methods without a reservoir are baselines and are drawn in neutral ink
 (solid, dashed, dotted). Reservoir methods take the categorical colours in
@@ -23,6 +28,8 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
+import warnings
 from collections import defaultdict
 from pathlib import Path
 
@@ -86,7 +93,8 @@ def method_styles(summary) -> dict[str, dict]:
     return styles
 
 
-def convergence(curves, summary, styles, out, fmt):
+def convergence(curves, summary, styles, out, fmt, column="tv_error",
+                stem="convergence", what="convergence"):
     starts = sorted({r["start"] for r in curves},
                     key=lambda s: [r["start"] for r in curves].index(s))
     fig, axes = plt.subplots(1, len(starts), figsize=(4.2 * len(starts), 3.8),
@@ -94,10 +102,11 @@ def convergence(curves, summary, styles, out, fmt):
     runs = defaultdict(list)
     for r in curves:
         runs[(r["method"], r["start"], r["seed"])].append(
-            (num(r["cost_md_steps"]), num(r["tv_error"])))
+            (num(r["cost_md_steps"]), num(r.get(column, ""))))
     all_cost = [c for pts in runs.values() for c, _ in pts if c > 0]
     grid = np.logspace(np.log10(min(all_cost)), np.log10(max(all_cost)), 60)
     threshold = summary["thresholds"]["tv"]
+    top = threshold
     for ax, start in zip(axes[0], starts):
         for name, st in styles.items():
             series = []
@@ -112,15 +121,22 @@ def convergence(curves, summary, styles, out, fmt):
             if not series:
                 continue
             arr = np.array(series)
-            ok = np.isfinite(arr).all(axis=0)
-            med = np.where(ok, np.median(np.where(ok, arr, 0), axis=0), np.nan)
-            lo = np.where(ok, np.min(np.where(ok, arr, 0), axis=0), np.nan)
-            hi = np.where(ok, np.max(np.where(ok, arr, 0), axis=0), np.nan)
+            # Over the seeds present at each cost, where at least half are:
+            # runs whose reservoirs stopped themselves start and end at
+            # different costs.
+            ok = np.isfinite(arr).sum(axis=0) >= math.ceil(len(arr) / 2)
+            with np.errstate(all="ignore"), warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                med = np.where(ok, np.nanmedian(arr, axis=0), np.nan)
+                lo = np.where(ok, np.nanmin(arr, axis=0), np.nan)
+                hi = np.where(ok, np.nanmax(arr, axis=0), np.nan)
             if not st["baseline"]:
                 ax.fill_between(grid, lo, hi, color=st["color"], alpha=0.12,
                                 lw=0)
             ax.plot(grid, np.maximum(med, 1e-4), color=st["color"],
                     ls=st["ls"], label=name)
+            if np.isfinite(hi).any():
+                top = max(top, float(np.nanmax(hi)))
             idx = np.flatnonzero(np.isfinite(med))
             if idx.size and not st["baseline"]:
                 ax.plot(grid[idx[-1]], max(med[idx[-1]], 1e-4), st["marker"],
@@ -128,17 +144,20 @@ def convergence(curves, summary, styles, out, fmt):
         ax.axhline(threshold, color=MUTED, lw=1, ls=(0, (4, 3)))
         ax.set_xscale("log")
         ax.set_yscale("log")
-        ax.set_ylim(bottom=threshold / 20)
         ax.set_title(f"started {start}", loc="left")
         ax.set_xlabel("MD steps over all replicas, reservoir included")
+    # Set once, for both panels: a limit set per panel stops the shared
+    # axis from growing to fit the next panel's data.
+    axes[0][0].set_ylim(threshold / 20, top * 1.5)
     axes[0][0].set_ylabel("population error (TV distance)")
     axes[0][-1].legend(fontsize=7.5, loc="best")
-    fig.suptitle(f"{summary['benchmark']}: convergence at "
-                 f"{summary['temperature_K']:g} K (median over seeds; "
+    fig.suptitle(f"{summary['benchmark']}: {what} at "
+                 f"{summary['temperature_K']:g} K (median over the seeds "
+                 "present, where at least half are; "
                  f"dashed line: threshold {threshold:g})",
                  x=0.01, ha="left", fontsize=10)
     fig.tight_layout(rect=(0, 0, 1, 0.93))
-    save(fig, out / "convergence", fmt)
+    save(fig, out / stem, fmt)
 
 
 def cost_to_converge(summary, styles, out, fmt):
@@ -250,6 +269,72 @@ def agreement(rows, summary, styles, out, fmt):
     save(fig, out / "agreement", fmt)
 
 
+def reservoir_budget(res_rows, summary, styles, out, fmt):
+    """Cost to converge and the reservoir's halves distance, against the
+    reservoir's own cost: how much of a budget the reservoir should take."""
+    names = [n for n, st in styles.items() if not st["baseline"]]
+    costs = defaultdict(list)
+    halves = defaultdict(list)
+    for r in res_rows:
+        if r["method"] in names:
+            costs[r["method"]].append(num(r["md_steps"]) / 1e6)
+            if r.get("halves_tv") not in ("", None):
+                halves[r["method"]].append(num(r["halves_tv"]))
+    names = [n for n in names if costs[n]]
+    if len({round(np.mean(costs[n]), 3) for n in names}) < 2:
+        return
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(9.0, 4.0))
+    threshold = summary["thresholds"]["tv"]
+    handles = []
+    for name in names:
+        st = styles[name]
+        c = np.array(costs[name])
+        x, xlo, xhi = np.mean(c), np.min(c), np.max(c)
+        m = summary["methods"][name]
+        conv = m.get("both_starts_converged_tv_cost_md_steps") or \
+            next(iter(m["starts"].values()))["converged_tv_cost_md_steps"]
+        if conv["median"] is None:
+            y = conv["limit"] / 1e6
+            (h,) = ax1.plot(x, y, st["marker"], mfc="white", color=st["color"],
+                            ms=7, label=f"{name} (not converged)")
+        else:
+            y = conv["median"] / 1e6
+            lo = (conv["low"] if conv["low"] is not None
+                  else conv["median"]) / 1e6
+            hi = (conv["high"] if conv["high"] is not None
+                  else conv["limit"]) / 1e6
+            ax1.plot([x, x], [lo, hi], color=st["color"], lw=2)
+            (h,) = ax1.plot(x, y, st["marker"], color=st["color"], ms=7,
+                            label=name)
+        handles.append(h)
+        if xhi > xlo:            # a reservoir that stopped itself varies
+            ax1.plot([xlo, xhi], [y, y], color=st["color"], lw=1)
+        if halves[name]:
+            hv = np.array(halves[name])
+            ax2.plot(np.full(len(hv), x), hv, "_", color=MUTED, ms=8)
+            ax2.plot(x, np.mean(hv), st["marker"], color=st["color"], ms=7)
+    lim = [0, max(max(costs[n]) for n in names) * 1.1]
+    ax1.plot(lim, lim, color=MUTED, lw=1, ls=(0, (4, 3)))
+    ax1.text(lim[1] * 0.97, lim[1] * 0.84, "reservoir cost alone",
+             color=MUTED, fontsize=7.5, ha="right", va="top")
+    for ax in (ax1, ax2):
+        ax.set_xlim(*lim)
+        ax.set_ylim(bottom=0)
+        ax.set_xlabel("MD steps spent on the reservoir (millions)")
+    ax1.set_ylabel("MD steps until both starts converged (millions)")
+    ax1.set_title("Cost to converge\nmedian, 95% interval over seeds; "
+                  "open: not converged", loc="left", fontsize=9)
+    ax2.axhline(threshold, color=MUTED, lw=1, ls=(0, (4, 3)))
+    ax2.set_ylabel("TV between the reservoir's halves")
+    ax2.set_title("The reservoir's own convergence\nmean; ticks: each "
+                  f"reservoir; dashed: threshold {threshold:g}", loc="left",
+                  fontsize=9)
+    fig.legend(handles=handles, loc="lower center", ncol=len(handles),
+               fontsize=7.5)
+    fig.tight_layout(rect=(0, 0.08, 1, 1))
+    save(fig, out / "reservoir_budget", fmt)
+
+
 def save(fig, stem: Path, fmt: list[str]) -> None:
     for f in fmt:
         fig.savefig(f"{stem}.{f}")
@@ -273,6 +358,13 @@ def main() -> None:
     populations(summary, styles, out, args.format)
     agreement(read_csv(a / "agreement.csv"), summary, styles, out,
               args.format)
+    curves = read_csv(a / "curves.csv")
+    if summary.get("mbar") and any(r.get("tv_error_mbar") for r in curves):
+        convergence(curves, summary, styles, out, args.format,
+                    column="tv_error_mbar", stem="convergence_mbar",
+                    what="convergence by MBAR over every temperature")
+    reservoir_budget(read_csv(a / "reservoirs.csv"), summary, styles, out,
+                     args.format)
 
 
 if __name__ == "__main__":
