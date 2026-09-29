@@ -108,6 +108,23 @@ reweights every frame by exp(V_bias/kT_R), so the reservoir is a weighted
 sample of the unbiased system. The build reports the Kish effective number
 of frames, which falls as the bias grows.
 
+A reservoir's clusters can also be given populations found elsewhere, for
+a simulation that equilibrates within basins but crosses between them too
+rarely to weigh them. `resremd reservoir cluster` groups the frames by
+`labels` or by a grid on `torsions` and writes a weighted reservoir in
+which each cluster carries its population:
+
+```
+resremd reservoir cluster --source reservoir --output clustered \
+    --labels labels.npy --populations populations.json
+```
+
+Every frame is kept and reweighted within its cluster, which is exact when
+the frames are a Boltzmann sample within each cluster. `--representatives`
+keeps one frame per cluster instead, weighted by its population: a smaller
+reservoir, but an approximation, close only for narrow clusters.
+Populations can be a JSON mapping or an Amber `clusterinfo` file.
+
 A replica exchange run coupled to a reservoir is exactly as correct as the
 reservoir. The build reports how many effectively independent frames the
 reservoir holds, judged from the potential energy. Slow conformational

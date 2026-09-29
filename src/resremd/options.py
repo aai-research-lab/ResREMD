@@ -527,7 +527,69 @@ IMPORT = Schema(
     ),
 )
 
-SCHEMAS = {s.name: s for s in (RUN, GENERATE, IMPORT)}
+CLUSTER_SOURCE = Option(
+    "source", str, None,
+    "The reservoir whose clusters are to be given populations: generated "
+    "or imported, Boltzmann or weighted.",
+    group="Input", required=True, example="reservoir/")
+
+CLUSTER_LABELS = Option(
+    "labels", (str, list), None,
+    "A cluster label (an integer) for each of the source's frames: a list, "
+    "a .npy file, or a text file with one per line. For Amber clusters, the "
+    "cluster numbers `clusterdihedral` wrote per frame. Give this or "
+    "`torsions`.",
+    group="Clusters", example="labels.npy")
+
+CLUSTER_TORSIONS = Option(
+    "torsions", list, None,
+    "Torsions (four atom indices each): each cell of a grid of `bins` arcs "
+    "per torsion is a cluster, labelled by its index from 0. Give this or "
+    "`labels`. For Amber `clusterdihedral` clusters, give its per-frame "
+    "cluster numbers as `labels` instead.",
+    group="Clusters", items=list, example=[[4, 6, 8, 10]])
+
+CLUSTER_BINS = Option(
+    "bins", int, 10,
+    "Arcs per torsion for `torsions`. Cell k of a torsion is centred on "
+    "-180 + k 360/bins degrees.",
+    group="Clusters", minimum=2)
+
+POPULATIONS = Option(
+    "populations", (str, dict), None,
+    "Each cluster's population at the reservoir temperature, by label: a "
+    "mapping, a JSON file of one, or an Amber `clusterinfo` file. Left out, "
+    "clusters keep their populations in the source, which only "
+    "`representatives` can use.",
+    group="Clusters", example="populations.json")
+
+REPRESENTATIVES = Option(
+    "representatives", bool, False,
+    "Keep one frame per cluster, weighted by the cluster's population: a "
+    "smaller reservoir, but an approximation, close only for narrow "
+    "clusters. Without it every frame is kept and the clusters are "
+    "reweighted, which is exact when the frames are a Boltzmann sample "
+    "within each cluster.",
+    group="Clusters")
+
+CLUSTER = Schema(
+    name="reservoir cluster",
+    description="Give a reservoir's clusters populations: a weighted "
+                "reservoir with every frame reweighted, or one "
+                "representative per cluster.",
+    options=(
+        CLUSTER_SOURCE,
+        replace(OUTPUT_RESERVOIR, default=None, required=True,
+                example="clustered/"),
+        CLUSTER_LABELS, CLUSTER_TORSIONS, CLUSTER_BINS, POPULATIONS,
+        REPRESENTATIVES,
+        replace(RANDOM_SEED, group="Clusters",
+                help="Seed for picking representatives when clusters are "
+                     "given as labels."),
+    ),
+)
+
+SCHEMAS = {s.name: s for s in (RUN, GENERATE, IMPORT, CLUSTER)}
 
 
 # ---------------------------------------------------------------------------

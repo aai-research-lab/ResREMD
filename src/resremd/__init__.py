@@ -21,15 +21,17 @@ except ImportError:  # an uninstalled checkout
 from .analysis import format_summary, reservoir_coverage, summarize
 from .build import generate as generate_reservoir
 from .build import import_trajectories as import_reservoir
+from .clusters import cluster_reservoir
 from .errors import ResRemdError
 from .mbar import TemperatureReweighting
-from .options import GENERATE, IMPORT, RUN
+from .options import CLUSTER, GENERATE, IMPORT, RUN
 from .reservoir import Reservoir
 from .sampler import run
 
 __all__ = [
     "__version__", "run", "generate_reservoir", "import_reservoir",
+    "cluster_reservoir",
     "Reservoir", "summarize", "format_summary", "reservoir_coverage",
     "TemperatureReweighting", "ResRemdError",
-    "RUN", "GENERATE", "IMPORT",
+    "RUN", "GENERATE", "IMPORT", "CLUSTER",
 ]

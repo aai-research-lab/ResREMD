@@ -22,7 +22,7 @@ from typing import Any
 
 from . import __version__
 from .errors import ResRemdError
-from .options import GENERATE, IMPORT, RUN, Option, Schema
+from .options import CLUSTER, GENERATE, IMPORT, RUN, Option, Schema
 
 logger = logging.getLogger("resremd")
 
@@ -55,10 +55,13 @@ def _add_options(parser: argparse.ArgumentParser, schema: Schema) -> None:
                         if option.items in (dict, list) \
                         else (option.items or str)
             else:
-                kwargs["type"] = option.type
+                # A setting that also takes a mapping (in the API) is a file
+                # name on the command line.
+                kind = str if isinstance(option.type, tuple) else option.type
+                kwargs["type"] = kind
                 if option.choices:
                     kwargs["choices"] = option.choices
-                kwargs["metavar"] = option.type.__name__.upper()
+                kwargs["metavar"] = kind.__name__.upper()
             group.add_argument(flag(option), **kwargs)
 
 
@@ -143,6 +146,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_imp = res_sub.add_parser("import", help=IMPORT.description,
                                description=IMPORT.description)
     _add_options(p_imp, IMPORT)
+    p_clu = res_sub.add_parser("cluster", help=CLUSTER.description,
+                               description=CLUSTER.description)
+    _add_options(p_clu, CLUSTER)
 
     p_sum = sub.add_parser("summary", help="Exchange statistics of a run.")
     p_sum.add_argument("run_dir")
@@ -152,7 +158,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_opt = sub.add_parser("options",
                            help="Print a settings file with every option.")
     p_opt.add_argument("which", nargs="?", default="run",
-                       choices=("run", "generate", "import"))
+                       choices=("run", "generate", "import", "cluster"))
 
     p_lad = sub.add_parser(
         "ladder", help="Print a temperature ladder: geometric, or tuned on a "
@@ -189,6 +195,10 @@ def main(argv: list[str] | None = None) -> int:
 
             if args.action == "generate":
                 generate(**_settings(args, GENERATE))
+            elif args.action == "cluster":
+                from .clusters import cluster_reservoir
+
+                cluster_reservoir(**_settings(args, CLUSTER))
             else:
                 import_trajectories(**_settings(args, IMPORT))
         elif args.command == "summary":
@@ -199,7 +209,7 @@ def main(argv: list[str] | None = None) -> int:
                   else format_summary(summary))
         elif args.command == "options":
             schema = {"run": RUN, "generate": GENERATE,
-                      "import": IMPORT}[args.which]
+                      "import": IMPORT, "cluster": CLUSTER}[args.which]
             print(template(schema))
         elif args.command == "ladder":
             from .ladder import from_pilot, geometric
