@@ -153,11 +153,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_opt.add_argument("which", nargs="?", default="run",
                        choices=("run", "generate", "import"))
 
-    p_lad = sub.add_parser("ladder", help="Print a geometric temperature "
-                                          "ladder.")
-    p_lad.add_argument("--temperature-min-K", type=float, required=True)
-    p_lad.add_argument("--temperature-max-K", type=float, required=True)
-    p_lad.add_argument("--n-replicas", type=int, required=True)
+    p_lad = sub.add_parser(
+        "ladder", help="Print a temperature ladder: geometric, or tuned on a "
+                       "pilot run's energies.",
+        description="Print a temperature ladder. Geometric from "
+                    "--temperature-min-K, --temperature-max-K and "
+                    "--n-replicas; or, with --from-pilot, the fewest "
+                    "temperatures that give every neighbour pair the target "
+                    "acceptance, predicted from a pilot run's energies "
+                    "(within the pilot's range).")
+    p_lad.add_argument("--temperature-min-K", type=float)
+    p_lad.add_argument("--temperature-max-K", type=float)
+    p_lad.add_argument("--n-replicas", type=int)
+    p_lad.add_argument("--from-pilot", metavar="RUN_DIR",
+                       help="A finished or stopped run to tune on.")
+    p_lad.add_argument("--target-acceptance", type=float, default=0.3,
+                       help="With --from-pilot (default 0.3).")
     return parser
 
 
@@ -189,11 +200,36 @@ def main(argv: list[str] | None = None) -> int:
                       "import": IMPORT}[args.which]
             print(template(schema))
         elif args.command == "ladder":
-            from .ladder import geometric
+            from .ladder import from_pilot, geometric
 
-            for t in geometric(args.temperature_min_K, args.temperature_max_K,
-                               args.n_replicas):
-                print(f"{t:.2f}")
+            if args.from_pilot:
+                r = from_pilot(args.from_pilot,
+                               temperature_min_K=args.temperature_min_K,
+                               temperature_max_K=args.temperature_max_K,
+                               target_acceptance=args.target_acceptance)
+                print("pilot ladder: predicted against observed acceptance")
+                for a, b, p, o in zip(r["pilot_temperatures_K"],
+                                      r["pilot_temperatures_K"][1:],
+                                      r["pilot_predicted_acceptance"],
+                                      r["pilot_observed_acceptance"]):
+                    print(f"  {a:8.2f} {b:8.2f}  {p:.3f}  {o:.3f}")
+                print(f"tuned ladder, {len(r['temperatures_K'])} "
+                      "temperatures (predicted acceptance to the next):")
+                for t, p in zip(r["temperatures_K"],
+                                r["predicted_acceptance"] + [None]):
+                    print(f"{t:.2f}" + ("" if p is None else f"  {p:.3f}"))
+                print("temperatures_K: [" + ", ".join(
+                    f"{t:.2f}" for t in r["temperatures_K"]) + "]")
+            else:
+                missing = [f for f in ("temperature_min_K",
+                                       "temperature_max_K", "n_replicas")
+                           if getattr(args, f) is None]
+                if missing:
+                    parser.error("a geometric ladder needs " + ", ".join(
+                        "--" + f.replace("_", "-") for f in missing))
+                for t in geometric(args.temperature_min_K,
+                                   args.temperature_max_K, args.n_replicas):
+                    print(f"{t:.2f}")
     except ResRemdError as exc:
         logger.error("%s [%s]", exc, exc.code)
         return 2

@@ -139,7 +139,15 @@ upper bound, and not as proof that the reservoir is converged.
 
 - **Ladder.** Geometric spacing is the default. Aim for 20 to 40 percent
   acceptance between neighbours; `resremd summary` reports it per pair. Give
-  `temperatures_K` to set the ladder by hand.
+  `temperatures_K` to set the ladder by hand. To tune one, run a short pilot
+  over the range and let its energies place the rungs:
+  ```
+  resremd ladder --from-pilot pilot --target-acceptance 0.3
+  ```
+  This prints the fewest temperatures that give every neighbour pair the
+  target, with the acceptance it predicts for each, and for the pilot's own
+  ladder the predicted against the observed acceptance as a check. It
+  cannot place rungs outside the pilot's range.
 - **Reservoir temperature.** Hot enough that barriers are crossed readily in
   the reservoir simulation, and close enough to the top replica that frames
   are accepted. Leaving `temperature_max_K` out places the reservoir one

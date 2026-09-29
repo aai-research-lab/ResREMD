@@ -54,25 +54,30 @@ def solve(u_kn, n_k, *, initial=None, tolerance: float = 1e-10,
                      - np.dot(n, f))
 
     f = np.zeros(k) if initial is None else np.asarray(initial, float).copy()
+    free = np.arange(1, k)
     for _ in range(max_iterations):
         a = (f + log_n)[:, None] - u
         w = np.exp(a - _logsumexp(a, 0)[None, :])          # (k, total)
         grad = w.sum(axis=1) - n
-        if np.max(np.abs(grad)) < tolerance * total:
-            break
         hess = np.diag(w.sum(axis=1)) - w @ w.T
-        free = np.arange(1, k)
         try:
             step = np.linalg.solve(hess[np.ix_(free, free)], -grad[free])
         except np.linalg.LinAlgError:
             step = -grad[free] / np.maximum(np.diag(hess)[free], 1e-12)
+        # Half the Newton decrement: how far the objective is from its
+        # minimum, near it.
+        decrement = -0.5 * float(np.dot(grad[free], step))
+        if decrement < tolerance * total:
+            break
         full = np.zeros(k)
         full[free] = step
         f0 = objective(f)
         t = 1.0
-        while t > 1e-8 and objective(f + t * full) > f0 + 1e-4 * t * np.dot(
-                grad, full):
+        while objective(f + t * full) > f0 + 1e-4 * t * np.dot(grad, full):
             t *= 0.5
+            if t < 1e-10:
+                # No decrease is representable: as close as float allows.
+                return f - f[0]
         f = f + t * full
     else:
         raise RuntimeError("MBAR did not converge. The states may not "
