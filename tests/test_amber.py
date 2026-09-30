@@ -153,3 +153,42 @@ def test_clusterinfo_needs_amber_bins(tmp_path):
                                  topology=_topology(tmp_path),
                                  output=str(tmp_path / "r"),
                                  clusterinfo=str(tmp_path / "ci"))
+
+
+DATA = __import__("pathlib").Path(__file__).parent / "data" / "amber"
+
+
+def test_a_reservoir_written_by_cpptraj(tmp_path):
+    """The real file: unlimited frame dimension, eptot, bins and temp0 as
+    cpptraj V7.11.2 writes them (see tests/data/amber)."""
+    import openmm
+    from openmm import app
+
+    from resremd.system import write_prepared
+
+    pdb = app.PDBFile(str(DATA / "ala.pdb"))
+    system = app.ForceField("amber14-all.xml").createSystem(
+        pdb.topology, nonbondedMethod=app.NoCutoff, constraints=None)
+    write_prepared(tmp_path / "setup", system, pdb.topology,
+                   np.array(pdb.getPositions(asNumpy=True)._value), None)
+    meta = resremd.import_reservoir(
+        trajectories=[str(DATA / "res_bins.nc")],
+        prepared=str(tmp_path / "setup"), output=str(tmp_path / "r"),
+        clusterinfo=str(DATA / "clusterinfo.dat"))
+    assert meta["temperature_K"] == 500.0 and meta["n_frames"] == 60
+    assert meta["kind"] == "weighted"
+    labels = np.load(tmp_path / "r/cluster_labels.npy")
+    assert np.bincount(labels).tolist() == [0, 29, 17, 8, 3, 2, 1]
+    # Populations from clustering these same frames weight them equally.
+    r = Reservoir.open(tmp_path / "r")
+    assert np.allclose(r.weights, 1 / 60)
+    # Amber's energies are OpenMM's here, to the file's rounding: far
+    # inside what the run's Hamiltonian check lets through.
+    context = openmm.Context(system, openmm.VerletIntegrator(0.001),
+                             openmm.Platform.getPlatformByName("Reference"))
+    ours = []
+    for k in range(r.n_frames):
+        context.setPositions(r.frame(k)[0])
+        ours.append(context.getState(getEnergy=True)
+                    .getPotentialEnergy()._value)
+    assert r.hamiltonian_spread(np.array(ours)) < 0.01 * r.warn_kt()

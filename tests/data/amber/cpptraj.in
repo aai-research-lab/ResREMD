@@ -1,0 +1,8 @@
+parm ala.pdb
+trajin ala.dcd
+readdata ene.dat name E
+clusterdihedral phibins 4 psibins 4 out cd.out framefile frames.dat clusterinfo clusterinfo.dat clustervtime CVT
+run
+list dataset
+createreservoir res_bins.nc ene E temp0 500 iseed 1234 bin DCVT_00002
+run

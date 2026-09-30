@@ -125,9 +125,9 @@ keeps one frame per cluster instead, weighted by its population: a smaller
 reservoir, but an approximation, close only for narrow clusters.
 Populations can be a JSON mapping or an Amber `clusterinfo` file.
 
-Amber reservoirs, the NetCDF files cpptraj's `createreservoir` writes,
-import directly with `resremd reservoir import --trajectories res.nc
---prepared setup`. Their temperature and per-frame energies come along, so
+Amber reservoirs, the NetCDF files cpptraj's `createreservoir` writes
+(tested on files from cpptraj 7.11), import directly with `resremd
+reservoir import --trajectories res.nc --prepared setup`. Their temperature and per-frame energies come along, so
 the run's Hamiltonian check covers them (Amber's and OpenMM's energies of
 the same force field agree closely but not exactly; `reservoir_reweight`
 takes up a difference the check flags). With cluster bins and
