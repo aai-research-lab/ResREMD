@@ -123,6 +123,14 @@ def template(schema: Schema) -> str:
     return "\n".join(lines)
 
 
+def _positive(text: str) -> int:
+    value = int(text)
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"{text} is not a count of at "
+                                         "least 1")
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="resremd",
@@ -187,7 +195,7 @@ def build_parser() -> argparse.ArgumentParser:
                     "interval on a GPU.")
     p_thr.add_argument("--prepared", required=True, metavar="DIR")
     p_thr.add_argument("--n-replicas", type=int, default=8)
-    p_thr.add_argument("--contexts-per-device", type=int, nargs="+",
+    p_thr.add_argument("--contexts-per-device", type=_positive, nargs="+",
                        default=[1, 2, 4, 8], metavar="N")
     p_thr.add_argument("--steps", type=int, default=500,
                        help="MD steps per cycle, the exchange interval "
@@ -203,6 +211,9 @@ def build_parser() -> argparse.ArgumentParser:
                             "evaluations.")
     p_thr.add_argument("--rest2-selection", default="solute",
                        choices=("all", "not water", "solute"))
+    p_thr.add_argument("--ensemble", choices=("nvt", "npt"),
+                       help="As for a run; left out, the prepared System "
+                            "decides (its barostat, if it has one).")
     p_thr.add_argument("--json", action="store_true")
     return parser
 
@@ -247,9 +258,12 @@ def main(argv: list[str] | None = None) -> int:
                            timestep_fs=args.timestep_fs,
                            platform=args.platform, precision=args.precision,
                            devices=args.devices, rest2=args.rest2,
-                           rest2_selection=args.rest2_selection)
+                           rest2_selection=args.rest2_selection,
+                           ensemble=args.ensemble, isolate=True)
             print(json.dumps(rows, indent=2) if args.json
                   else format_rows(rows, args.n_replicas))
+            if all("error" in r for r in rows):
+                return 2
         elif args.command == "ladder":
             from .ladder import from_pilot, geometric
 
