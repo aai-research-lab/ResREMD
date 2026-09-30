@@ -58,8 +58,10 @@ def test_detailed_balance_on_two_levels():
     ba, bb = beta(300), beta(600)
     # Two replicas, each a two-level system; exchanges only. Start from
     # independent Boltzmann draws and check the joint distribution stays put.
-    pa = np.exp(-ba * levels); pa /= pa.sum()
-    pb = np.exp(-bb * levels); pb /= pb.sum()
+    pa = np.exp(-ba * levels)
+    pa /= pa.sum()
+    pb = np.exp(-bb * levels)
+    pb /= pb.sum()
     counts = np.zeros((2, 2))
     for _ in range(40000):
         i, j = rng.choice(2, p=pa), rng.choice(2, p=pb)

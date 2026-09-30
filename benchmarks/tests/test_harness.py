@@ -1,7 +1,6 @@
 """The harness, end to end on the smoke spec (a minute on a CPU)."""
 
 import json
-import shutil
 from pathlib import Path
 
 import pytest
