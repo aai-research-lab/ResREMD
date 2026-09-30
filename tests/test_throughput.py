@@ -28,3 +28,27 @@ def test_throughput_command_with_rest2(tmp_path, capsys):
                  "--rest2", "--rest2-selection", "all", "--json"]) == 0
     rows = json.loads(capsys.readouterr().out)
     assert rows[0]["contexts_per_device"] == 1
+
+
+def test_the_cpu_runs_one_single_threaded_context_per_core():
+    import numpy as np
+
+    from resremd.engine import Engine, available_cores
+    from resremd.thermo import ensemble_of
+
+    p = testsystems.lj_box()
+    ensemble, _ = ensemble_of(p.system)
+    engine = Engine(system=p.system, ensemble=ensemble, n_replicas=16,
+                    integrator="langevin_middle", timestep_fs=2.0,
+                    friction_per_ps=1.0, temperature_K=100.0, platform="CPU",
+                    precision="mixed", devices=None, contexts_per_device=None,
+                    cpu_threads=None, seeds=np.random.default_rng(0))
+    try:
+        cores = available_cores()
+        assert engine.describe()["contexts"] == min(16, cores)
+        if cores > 1:
+            threads = engine.slots[0].context.getPlatform().getPropertyValue(
+                engine.slots[0].context, "Threads")
+            assert int(threads) == 1
+    finally:
+        engine.close()

@@ -323,7 +323,11 @@ is counted twice. Reservoir builds stop and resume the same way.
 - `contexts_per_device`: simulations kept on each device at once. With as
   many contexts as replicas, replicas never leave the GPU and an exchange
   changes only their temperature. With fewer, replicas share contexts and
-  are swapped in and out. The default is up to 4 on a GPU and 1 on the CPU.
+  are swapped in and out. The default is up to 4 on a GPU, and on the CPU
+  one single-threaded context per core, up to the number of replicas. For
+  Ac-Pro-NMe with 8 replicas on 2 cores, that ran 5.5 times faster in total
+  than one context sharing both cores in GBn2, and 1.2 times faster in
+  water.
 - To choose, time the system itself:
   ```
   resremd throughput --prepared setup --n-replicas 8 \

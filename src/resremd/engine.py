@@ -225,6 +225,15 @@ def _box(state: Any) -> np.ndarray:
                       dtype=float)
 
 
+def available_cores() -> int:
+    """Cores this process may run on (its affinity where the system reports
+    one, as in a container or a job allocation)."""
+    try:
+        return max(1, len(os.sched_getaffinity(0)))
+    except AttributeError:          # macOS and Windows
+        return max(1, os.cpu_count() or 1)
+
+
 class Engine:
     """All slots, and the replicas assigned to them."""
 
@@ -259,12 +268,23 @@ class Engine:
                            self.platform)
             device_list = [None]
         per_device_replicas = math.ceil(n_replicas / len(device_list))
-        wanted = contexts_per_device or (4 if gpu else 1)
+        if contexts_per_device:
+            wanted = contexts_per_device
+        elif gpu:
+            wanted = 4
+        elif self.platform == "CPU":
+            # One single-threaded context per core: replicas advance in
+            # parallel, which beats one context sharing its threads over a
+            # small system's short steps.
+            wanted = available_cores()
+        else:
+            wanted = 1
         per_device = max(1, min(wanted, per_device_replicas))
         threads = cpu_threads
+        cores = available_cores()
         if self.platform == "CPU" and per_device > 1 and not cpu_threads:
-            threads = max(1, (os.cpu_count() or 1) // per_device)
-            if threads != (os.cpu_count() or 1):
+            threads = max(1, cores // per_device)
+            if threads != cores:
                 # The first context was made with every core; remake it so
                 # the contexts do not compete for the same ones.
                 del first

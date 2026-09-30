@@ -265,13 +265,16 @@ CONTEXTS_PER_DEVICE = Option(
     "contexts_per_device", int, None,
     "Simulations kept on each device at once. Replicas beyond this share a "
     "context and are swapped in and out of it. More contexts keep a small "
-    "system's GPU busy and cost memory. Left out: up to 4 on a GPU, 1 on the "
-    "CPU, whose one context already uses every core.",
+    "system's GPU busy and cost memory. Left out: up to 4 on a GPU, and on "
+    "the CPU one single-threaded context per core (up to the number of "
+    "replicas), which runs replicas in parallel. `resremd throughput` "
+    "measures the choice.",
     group="Hardware", minimum=1)
 
 CPU_THREADS = Option(
     "cpu_threads", int, None,
-    "Threads for the CPU platform. Left out, OpenMM's default.",
+    "Threads for each context on the CPU platform. Left out, the cores are "
+    "shared out among the contexts (one each by default).",
     group="Hardware", minimum=1)
 
 TRAJECTORY_INTERVAL = Option(
