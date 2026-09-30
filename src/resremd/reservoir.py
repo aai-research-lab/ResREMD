@@ -427,8 +427,9 @@ class Reservoir:
             raise ReservoirError(
                 "Reweighting a reservoir to another Hamiltonian needs the "
                 "energies recorded when it was built, and this one has none "
-                "(it was imported). Generate it with `resremd reservoir "
-                "generate`, or import it as `non_boltzmann`.",
+                "(it was imported from files without them). Generate it with "
+                "`resremd reservoir generate`, import an Amber reservoir, "
+                "which records them, or import it as `non_boltzmann`.",
                 code="resremd.reservoir.reweight")
         built = np.load(stored)
         du = np.asarray(potential_kjmol, dtype=float) - built
@@ -460,7 +461,8 @@ class Reservoir:
         """Refuse a reservoir sampled under a different Hamiltonian.
 
         A reservoir this package generated keeps the potential energy of
-        every frame from its own simulation. Recomputed under the run's
+        every frame from its own simulation, and an imported Amber
+        reservoir the energies Amber recorded. Recomputed under the run's
         System they differ only by precision and platform noise, and by a
         constant if the two Systems differ by one, which does not change the
         distribution. A spread in the difference that is not small next to

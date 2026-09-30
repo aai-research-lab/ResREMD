@@ -799,6 +799,56 @@ def _read_frames(md, files: list[str], ref_top: Any, chunk: int = 1000):
             yield f, part.xyz, part.unitcell_vectors
 
 
+def _amber_reservoirs(files: list[str]) -> dict[str, Any] | None:
+    """Temperature, energies (kJ/mol) and cluster bins of Amber reservoirs:
+    NetCDF trajectories with the `eptot` and `temp0` variables cpptraj's
+    `createreservoir` writes. None when the files are not; refused when
+    only some are."""
+    from scipy.io import netcdf_file
+
+    found = []
+    for f in files:
+        if Path(f).suffix.lower() not in (".nc", ".ncdf", ".netcdf") \
+                or not Path(f).is_file():
+            found.append(None)
+            continue
+        try:
+            # Memory-mapped, so only these small variables are read, not
+            # the coordinates; copies outlive the file.
+            with netcdf_file(f, "r", mmap=True) as nc:
+                v = nc.variables
+                entry = None
+                if "eptot" in v and "temp0" in v:
+                    entry = {
+                        "temperature_K": float(np.array(v["temp0"].data)),
+                        "energies_kjmol": np.array(v["eptot"].data,
+                                                   dtype=float) * 4.184,
+                        "bins": np.array(v["bins"].data, dtype=int)
+                        if "bins" in v else None}
+                del v
+            found.append(entry)
+        except (OSError, TypeError, ValueError):
+            found.append(None)
+    if all(x is None for x in found):
+        return None
+    if any(x is None for x in found):
+        raise ReservoirError(
+            "Some of the files are Amber reservoirs and some are not; "
+            "import them separately.", code="resremd.reservoir.mismatch")
+    temps = {x["temperature_K"] for x in found}
+    if len(temps) > 1:
+        raise ReservoirError(
+            f"The Amber reservoirs were made at different temperatures "
+            f"({', '.join(f'{t:g}' for t in sorted(temps))} K).",
+            code="resremd.reservoir.temperature")
+    bins = None if any(x["bins"] is None for x in found) \
+        else np.concatenate([x["bins"] for x in found])
+    return {"temperature_K": temps.pop(),
+            "energies_kjmol": np.concatenate([x["energies_kjmol"]
+                                              for x in found]),
+            "bins": bins}
+
+
 def import_trajectories(**settings: Any) -> dict[str, Any]:
     """Build a reservoir from existing trajectories or structures.
 
@@ -809,7 +859,28 @@ def import_trajectories(**settings: Any) -> dict[str, Any]:
     o = resolve_options(IMPORT, settings)
     md = require("mdtraj", "Reading trajectories into a reservoir", "import")
     kind = o["kind"]
-    if kind == "weighted" and not o["weights"]:
+    amber = _amber_reservoirs([str(f) for f in o["trajectories"]])
+    if amber is not None:
+        if o["temperature_K"] is None:
+            o["temperature_K"] = amber["temperature_K"]
+        elif abs(o["temperature_K"] - amber["temperature_K"]) > 1e-6:
+            raise InputError(
+                f"The Amber reservoir was made at {amber['temperature_K']:g} "
+                f"K, not the {o['temperature_K']:g} K given.",
+                code="resremd.input.temperature")
+    if o["clusterinfo"]:
+        if amber is None or amber["bins"] is None:
+            raise InputError(
+                "`clusterinfo` weights the frames of Amber reservoirs by "
+                "their cluster bins, and these files carry none.",
+                code="resremd.input.clusters")
+        if kind == "non_boltzmann" or o["weights"]:
+            raise InputError(
+                "`clusterinfo` makes the weights of a weighted reservoir; "
+                "give it without `weights` or a non-Boltzmann kind.",
+                code="resremd.input.clusters")
+        kind = "weighted"
+    if kind == "weighted" and not o["weights"] and not o["clusterinfo"]:
         raise InputError("A weighted reservoir needs `weights`.",
                          code="resremd.input.missing")
     if kind != "weighted" and o["weights"]:
@@ -917,6 +988,20 @@ def import_trajectories(**settings: Any) -> dict[str, Any]:
                                  "not all zero.",
                                  code="resremd.reservoir.weights")
         weights = weights / weights.sum()
+    built = None
+    if amber is not None:
+        if amber["energies_kjmol"].size != total:
+            raise ReservoirError(
+                f"The Amber reservoirs record {amber['energies_kjmol'].size} "
+                f"energies for {total} frames.",
+                code="resremd.reservoir.mismatch")
+        if kind != "non_boltzmann":
+            built = amber["energies_kjmol"][keep]
+        if o["clusterinfo"]:
+            from .clusters import cluster_weights, read_populations
+
+            weights = cluster_weights(amber["bins"][keep],
+                                      read_populations(o["clusterinfo"]))
     pressure = o["pressure_bar"]
     if periodic:
         box_all = np.concatenate(boxes)[keep]
@@ -957,6 +1042,12 @@ def import_trajectories(**settings: Any) -> dict[str, Any]:
                 "stride": o["stride"],
                 "weights": str(Path(o["weights"]).resolve())
                 if o["weights"] else None,
+                "amber": None if amber is None else {
+                    "temperature_K": amber["temperature_K"],
+                    "energies": "eptot, kcal/mol converted to kJ/mol",
+                    "cluster_bins": amber["bins"] is not None,
+                    "clusterinfo": str(Path(o["clusterinfo"]).resolve())
+                    if o["clusterinfo"] else None},
                 "input_frames": total,
                 "lossy_formats": lossy})
     writer = ReservoirWriter(out, n_frames=n_frames, n_atoms=n_atoms,
@@ -985,6 +1076,12 @@ def import_trajectories(**settings: Any) -> dict[str, Any]:
         np.save(out / "weights.npy", weights)
         meta["statistics"] = {
             "effective_frames_kish": float(1.0 / np.sum(weights ** 2))}
+    if built is not None:
+        # Amber's own energies: the run's Hamiltonian check compares them
+        # with its own, as for a reservoir generated here.
+        np.save(out / "build_potential_kjmol.npy", built)
+    if amber is not None and amber["bins"] is not None:
+        np.save(out / "cluster_labels.npy", amber["bins"][keep])
     write_topology(out / "topology.pdb", omm_topology,
                    np.array(writer.positions[0], dtype=float),
                    None if writer.box is None else np.array(writer.box[0]))

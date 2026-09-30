@@ -125,6 +125,22 @@ keeps one frame per cluster instead, weighted by its population: a smaller
 reservoir, but an approximation, close only for narrow clusters.
 Populations can be a JSON mapping or an Amber `clusterinfo` file.
 
+Amber reservoirs, the NetCDF files cpptraj's `createreservoir` writes,
+import directly with `resremd reservoir import --trajectories res.nc
+--prepared setup`. Their temperature and per-frame energies come along, so
+the run's Hamiltonian check covers them (Amber's and OpenMM's energies of
+the same force field agree closely but not exactly; `reservoir_reweight`
+takes up a difference the check flags). With cluster bins and
+`--clusterinfo` from `clusterdihedral`, each frame is weighted so that its
+cluster carries the population listed there. This treats the frames as a
+Boltzmann sample at the reservoir temperature within each cluster, as from
+a simulation there, and exchanges them as such; Amber's own rremd=3
+exchanges clustered reservoirs as non-Boltzmann ones instead. Populations
+from clustering these same frames change nothing; the weights matter when
+the populations come from a longer or better-sampled simulation. A
+solvated Amber reservoir is often flagged by the Hamiltonian check, since
+Amber and OpenMM treat cutoffs and PME differently.
+
 A replica exchange run coupled to a reservoir is exactly as correct as the
 reservoir. The build reports how many effectively independent frames the
 reservoir holds, judged from the potential energy. Slow conformational
@@ -171,10 +187,11 @@ barostat feels its own Hamiltonian.
 - The reservoir holds the system's atoms in the same order (by a digest of
   the topology), and was sampled in the same pressure ensemble, with the
   same kind of barostat.
-- For a reservoir generated here, its frames' energies are recomputed under
-  the run's System and compared with those recorded when it was built. A
-  spread of more than 0.1 kT means another Hamiltonian (force field, cutoff,
-  solvent model) and the run is refused; above 0.03 kT it is warned about.
+- For a reservoir generated here, or an Amber reservoir, its frames'
+  energies are recomputed under the run's System and compared with those
+  recorded when it was built. A spread of more than 0.1 kT means another
+  Hamiltonian (force field, cutoff, solvent model) and the run is refused;
+  above 0.03 kT it is warned about.
   With `reservoir_reweight` the frames are reweighted to the run's
   Hamiltonian instead, and the run reports how many effective frames are
   left. A non-Boltzmann reservoir needs neither: its exchanges use only the

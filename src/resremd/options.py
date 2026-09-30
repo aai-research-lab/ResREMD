@@ -414,7 +414,9 @@ CONVERGENCE_MIN_TRANSITIONS = Option(
 TRAJECTORIES = Option(
     "trajectories", list, None,
     "Trajectory files to read frames from (any format MDTraj reads), in "
-    "order.",
+    "order. Amber reservoirs (NetCDF files from cpptraj `createreservoir`) "
+    "bring their temperature and each frame's energy, which the run's "
+    "Hamiltonian check then compares with its own.",
     group="Input", required=True, example=["hot_run.dcd"], items=str)
 
 TOPOLOGY = Option(
@@ -464,6 +466,16 @@ STRIDE = Option(
     "stride", int, 1,
     "Keep every this many input frames.",
     group="Reservoir", minimum=1)
+
+CLUSTERINFO = Option(
+    "clusterinfo", str, None,
+    "For Amber reservoirs with cluster bins (cpptraj `createreservoir ... "
+    "bin`): the `clusterinfo` file of the `clusterdihedral` run that made "
+    "them. Each frame is then weighted so that its cluster carries the "
+    "population listed there, giving a weighted reservoir. The frames must "
+    "be a Boltzmann sample at the reservoir temperature within each "
+    "cluster, as from a simulation there.",
+    group="Reservoir", example="clusterinfo.dat")
 
 SURFACE_TENSION = Option(
     "surface_tension_bar_nm", float, 0.0,
@@ -516,8 +528,9 @@ IMPORT = Schema(
         TRAJECTORIES, TOPOLOGY, IMPORT_PREPARED, OUTPUT_RESERVOIR,
         replace(RESERVOIR_TEMPERATURE, required=False,
                 help=RESERVOIR_TEMPERATURE.help
-                + " Required unless the kind is `non_boltzmann`."),
-        KIND, WEIGHTS, STRIDE,
+                + " Required unless the kind is `non_boltzmann`, or the "
+                  "files are Amber reservoirs, which record it."),
+        KIND, WEIGHTS, CLUSTERINFO, STRIDE,
         replace(PRESSURE, group="Reservoir",
                 help="Pressure the frames were sampled at, in bar. Required "
                      "when their boxes differ, and absent when they were "
