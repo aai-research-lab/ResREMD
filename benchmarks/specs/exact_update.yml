@@ -1,0 +1,54 @@
+# Tier 1c. Reservoirs updated during the run, on the exact double well.
+# `swap` puts the top replica's outgoing configuration in the place of the
+# frame it took, which keeps the joint distribution exactly; `append` adds
+# it, mixing the top replica's temperature into the reservoir. Each is
+# tried on a small reservoir, and on one missing the favoured well, which
+# no per-run check catches without updates (tier 1). CPU only.
+name: exact_update
+description: >
+  Whether updating a reservoir during the run biases it, and whether it
+  repairs a reservoir that lacks a state. Starts in the disfavoured well
+  (right) and in the favoured one (left).
+system: {name: double_well}
+temperatures_K: [300.0, 360.0, 432.0]
+seeds: [1, 2, 3, 4, 5]
+run:
+  production_steps: 5000000         # 10 ns per replica
+  exchange_interval_steps: 250
+  trajectory_interval_steps: 250
+  friction_per_ps: 5.0
+  equilibration_ns: 0.0
+  minimize: false
+  save_selection: all
+  platform: Reference
+methods:
+  - name: res_200
+    note: 200 exact frames, never changed
+    reservoir:
+      exact: {kind: boltzmann, temperature_K: 520.0, n_frames: 200}
+  - name: res_200_swap
+    run: {reservoir_update: swap}
+    reservoir:
+      exact: {kind: boltzmann, temperature_K: 520.0, n_frames: 200}
+  - name: res_200_append
+    run: {reservoir_update: append}
+    reservoir:
+      exact: {kind: boltzmann, temperature_K: 520.0, n_frames: 200}
+  - name: res_missing_left
+    note: the favoured well is absent from the reservoir
+    reservoir:
+      exact: {kind: boltzmann, temperature_K: 520.0, n_frames: 200,
+              drop_state: left}
+  - name: res_missing_left_swap
+    run: {reservoir_update: swap}
+    reservoir:
+      exact: {kind: boltzmann, temperature_K: 520.0, n_frames: 200,
+              drop_state: left}
+  - name: res_missing_left_append
+    run: {reservoir_update: append}
+    reservoir:
+      exact: {kind: boltzmann, temperature_K: 520.0, n_frames: 200,
+              drop_state: left}
+reference: {kind: exact}
+analysis: {threshold_tv: 0.02, threshold_jsd: 0.01, points: 40, mbar: true}
+slurm: {gres: null, cpus_per_task: 1}

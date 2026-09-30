@@ -136,3 +136,43 @@ def test_reweighting_needs_the_energies_recorded_at_build(tmp_path):
                     production_steps=250 * 10, exchange_interval_steps=250,
                     platform="Reference", equilibration_ns=0.0,
                     minimize=False, reservoir_reweight=True)
+
+
+def test_a_reservoir_updated_by_swaps_stays_exact(tmp_path):
+    """With `swap` the reservoir is a set of frozen replicas at its own
+    temperature, so the run stays exact; `append` is the biased variant."""
+    import json
+
+    run = run_double_well(tmp_path, "boltzmann", 30000,
+                          reservoir_update="swap")
+    check_against_exact(run)
+    res = json.loads((run / "manifest.json").read_text())["exchanges"][
+        "reservoir"]
+    assert res["update"]["frames_replaced"] == res["accepted"] > 0
+    assert res["update"]["frames_at_end"] == 20000
+
+
+def test_reservoir_update_needs_a_boltzmann_reservoir_and_no_resume(tmp_path):
+    from resremd.errors import InputError
+
+    prepared = testsystems.write_double_well_reservoir(
+        tmp_path / "u", kind="non_boltzmann", n_frames=10, temperature_K=None)
+    common = dict(temperatures_K=TEMPERATURES, production_steps=500,
+                  exchange_interval_steps=250, platform="Reference",
+                  equilibration_ns=0.0, minimize=False)
+    with pytest.raises(InputError, match="reservoir_update"):
+        resremd.run(prepared, output=str(tmp_path / "run"),
+                    reservoir=str(tmp_path / "u"), reservoir_update="append",
+                    **common)
+
+
+def test_reservoir_update_without_saving_the_top_state(tmp_path):
+    prepared = testsystems.write_double_well_reservoir(
+        tmp_path / "r", kind="boltzmann", n_frames=20, temperature_K=520.0)
+    m = resremd.run(prepared, output=str(tmp_path / "run"),
+                    reservoir=str(tmp_path / "r"), temperatures_K=TEMPERATURES,
+                    production_steps=250 * 400, exchange_interval_steps=250,
+                    trajectory_interval_steps=250, platform="Reference",
+                    random_seed=2, save_states="lowest", equilibration_ns=0.0,
+                    minimize=False, reservoir_update="swap")
+    assert m["exchanges"]["reservoir"]["update"]["frames_replaced"] > 0

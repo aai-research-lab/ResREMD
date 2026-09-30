@@ -149,6 +149,21 @@ RESERVOIR_REWEIGHT = Option(
     "use only this run's energies, so it serves any Hamiltonian as it is.",
     group="Reservoir")
 
+RESERVOIR_UPDATE = Option(
+    "reservoir_update", str, "none",
+    "For studying reservoirs that change during a run; not for production. "
+    "`swap`: when the top replica takes a reservoir frame, its own "
+    "configuration takes that frame's place, so the reservoir acts as "
+    "frozen replicas at its temperature and the joint distribution is kept "
+    "exactly. `append`: its configuration is added to the reservoir, "
+    "which then mixes frames from the top replica's temperature with the "
+    "reservoir's, and is biased. A configuration stored this way keeps "
+    "the energy it had in the replica, before constraints are reapplied on "
+    "injection, which differs at the constraint tolerance. Temperature REMD "
+    "at constant volume with a Boltzmann reservoir only; such a run cannot "
+    "be resumed.",
+    group="Reservoir", choices=("none", "swap", "append"))
+
 EXCHANGE_INTERVAL = Option(
     "exchange_interval_steps", int, 500,
     "MD steps between exchange attempts. 500 steps at 2 fs is 1 ps, as in "
@@ -492,7 +507,7 @@ RUN = Schema(
         PREPARED, OUTPUT_RUN, RESUME,
         TEMPERATURES, TEMPERATURE_MIN, TEMPERATURE_MAX, N_REPLICAS,
         REST2, REST2_SELECTION, REST2_ATOMS,
-        RESERVOIR, RESERVOIR_INTERVAL, RESERVOIR_REWEIGHT,
+        RESERVOIR, RESERVOIR_INTERVAL, RESERVOIR_REWEIGHT, RESERVOIR_UPDATE,
         EXCHANGE_INTERVAL,
         DURATION, PRODUCTION_STEPS, EQUILIBRATION, MINIMIZE,
         INTEGRATOR, TIMESTEP, FRICTION, ENSEMBLE, PRESSURE,

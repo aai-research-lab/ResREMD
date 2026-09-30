@@ -156,6 +156,7 @@ tier 1b only runs and reservoirs from opposite starts expose it.
 |---|---|---|
 | `smoke.yml` | does the harness work (CI runs it) | CPU, 15 s |
 | `exact_defects.yml` | tier 1: seven reservoirs, each flawed in one way, against plain REMD | CPU, about an hour |
+| `exact_update.yml` | tier 1c: reservoirs updated during the run (`reservoir_update`), small and missing a state | CPU, about half an hour |
 | `exact_torsion.yml` | tier 1b: plain against bias-weighted reservoirs across a barrier | CPU, about an hour |
 | `exact_torsion_budget.yml` | tier 1b: how much of a fixed budget the reservoir should take | CPU, about an hour |
 | `exact_torsion_rest2.yml` | tier 1b: REST2, REST2 with a reservoir, and a bias-weighted reservoir, at equal cost | CPU, about an hour |

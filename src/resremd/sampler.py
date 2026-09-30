@@ -89,7 +89,8 @@ REST2_CITATION = (
 
 #: Settings that decide what is sampled. A resumed run must match them.
 _SCIENTIFIC = ("temperatures_K", "rest2", "exchange_interval_steps",
-               "reservoir_interval", "reservoir_reweight", "integrator",
+               "reservoir_interval", "reservoir_reweight",
+               "reservoir_update", "integrator",
                "timestep_fs",
                "friction_per_ps", "trajectory_interval_steps", "save_states",
                "save_atoms", "save_replica_trajectories")
@@ -271,6 +272,25 @@ class _Run:
             frequency=o["barostat_frequency"])
         self.system = system
         self.ensemble = ensemble
+        if o["reservoir_update"] != "none":
+            if self.reservoir is None or self.rest2 is not None or \
+                    self.reservoir.kind != "boltzmann" or \
+                    ensemble.constant_pressure or o["reservoir_reweight"]:
+                raise InputError(
+                    "`reservoir_update` is for temperature REMD at constant "
+                    "volume with a Boltzmann reservoir, not reweighted.",
+                    code="resremd.input.reservoir_update")
+            if o["resume"]:
+                raise InputError(
+                    "A run with `reservoir_update` cannot be resumed: the "
+                    "updated reservoir is not saved.",
+                    code="resremd.input.reservoir_update")
+            self.warnings.append(
+                f"The reservoir is updated during the run "
+                f"(`reservoir_update: {o['reservoir_update']}`), for "
+                "studying the method. The reservoir checks judge it as it "
+                "was at the start, and frame numbers in the logs and origins "
+                "are slots whose contents change.")
         if self.rest2 is not None and ensemble.constant_pressure and \
                 self.rest2["dispersion_correction"] == "unscaled":
             self.warnings.append(
@@ -302,11 +322,13 @@ class _Run:
                 "frames_sha256": self.reservoir.content_digest()}),
             "rest2_solute": None if self.rest2 is None
             else self.rest2["solute_sha256"],
-            # The scaled dispersion correction changes sampling only through
-            # the barostat.
+            # How the dispersion correction scales: it changes sampling
+            # through the barostat, and at any volume the energies MBAR and
+            # pilots read from rest2_terms.csv.
             "rest2_dispersion": self.rest2["dispersion_correction"]
-            if self.rest2 is not None and ensemble.constant_pressure
-            and self.rest2["dispersion_correction"] == "scaled" else None,
+            if self.rest2 is not None and
+            self.rest2["dispersion_correction"] in ("scaled", "unscaled")
+            else None,
             **{k: (self.temperatures if k == "temperatures_K" else
                    self.plan["trajectory_interval_steps"]
                    if k == "trajectory_interval_steps" else
@@ -390,6 +412,7 @@ class _Run:
 
     def _reservoir_energies(self) -> None:
         self.res_h = None
+        self.res_store = None
         if self.reservoir is None:
             return
         import openmm
@@ -455,6 +478,16 @@ class _Run:
         # Kept with the run: the reservoir check in `resremd summary` compares
         # these with the top replica's own energies.
         np.save(self.out / "reservoir_enthalpy_kjmol.npy", self.res_h)
+        if self.options["reservoir_update"] != "none":
+            # In memory, to be changed: positions, boxes and energies.
+            self.res_store = {
+                "positions": [np.array(self.reservoir.positions[k],
+                                       dtype=float)
+                              for k in range(self.reservoir.n_frames)],
+                "box": [self.reservoir.frame(k)[1]
+                        for k in range(self.reservoir.n_frames)],
+                "h": list(map(float, self.res_h)),
+                "replaced": 0, "added": 0}
 
     def _start_fresh(self) -> None:
         o = self.options
@@ -534,7 +567,8 @@ class _Run:
         before = meta["fingerprint"]
         # Settings added since a run was started read as their defaults.
         added = {"rest2": False, "reservoir_reweight": False,
-                 "rest2_solute": None, "rest2_dispersion": None}
+                 "rest2_solute": None, "rest2_dispersion": None,
+                 "reservoir_update": "none"}
         differ = [k for k in self.fingerprint
                   if json.dumps(before.get(k, added.get(k)), sort_keys=True)
                   != json.dumps(self.fingerprint[k], sort_keys=True)]
@@ -754,6 +788,12 @@ class _Run:
                     "acceptance": (self.res_accepts / self.res_attempts
                                    if self.res_attempts else 0.0),
                     "distinct_frames_accepted": len(self.res_frames),
+                    **({"update": {
+                        "rule": self.options["reservoir_update"],
+                        "frames_replaced": self.res_store["replaced"],
+                        "frames_added": self.res_store["added"],
+                        "frames_at_end": len(self.res_store["h"])}}
+                       if getattr(self, "res_store", None) else {}),
                 },
             },
             "engine": {**self.engine.describe(), "seed": self.seed},
@@ -802,6 +842,11 @@ class _Run:
                 want = {self.replica_at[s] for s in saved_states}
                 if self.dcd_replicas:
                     want = set(range(n))
+            if o["reservoir_update"] != "none" and \
+                    (self.cycle + 1) % o["reservoir_interval"] == 0:
+                # The top replica after this cycle's neighbour swaps: the
+                # one at the top now, or the one just below it.
+                want |= {self.replica_at[n - 1], self.replica_at[max(0, n - 2)]}
             seg = self.engine.run(self.replicas, self._temps(), interval,
                                   want, self._scales())
             h = np.array([self.ensemble.enthalpy(
@@ -839,7 +884,9 @@ class _Run:
             self.cycle += 1
             if self.reservoir is not None and \
                     self.cycle % o["reservoir_interval"] == 0:
-                if terms is None:
+                if o["reservoir_update"] != "none":
+                    self._reservoir_exchange_updated(h, seg, head)
+                elif terms is None:
                     self._reservoir_exchange(h, head)
                 else:
                     self._reservoir_exchange_rest2(terms, seg, head)
@@ -926,6 +973,41 @@ class _Run:
             self.replicas[r].reset = (pos, box,
                                       int(self.seed_rng.integers(1, 2**31 - 1)))
             self.replicas[r].origin = k
+
+    def _reservoir_exchange_updated(self, h: np.ndarray, seg: dict,
+                                    head: list[Any]) -> None:
+        """A reservoir exchange whose outgoing configuration then changes
+        the reservoir (`reservoir_update`)."""
+        store = self.res_store
+        top = len(self.temperatures) - 1
+        r = self.replica_at[top]
+        n = len(store["h"])
+        k = int(min(self.exchange_rng.random() * n, n - 1))
+        la = log_acceptance_reservoir(self.betas[top], float(h[r]),
+                                      self.reservoir.beta, store["h"][k])
+        ok = accept(la, self.exchange_rng)
+        self.res_attempts += 1
+        self.log_reservoir.write(head + [r, k, float(h[r]), store["h"][k],
+                                         la, ok])
+        if not ok:
+            return
+        self.res_accepts += 1
+        self.res_frames.add(k)
+        pos, box = store["positions"][k].copy(), store["box"][k]
+        out = (np.array(seg[r].frame, dtype=float),
+               None if seg[r].box is None else np.array(seg[r].box),
+               float(h[r]))
+        if self.options["reservoir_update"] == "swap":
+            store["positions"][k], store["box"][k], store["h"][k] = out
+            store["replaced"] += 1
+        else:
+            store["positions"].append(out[0])
+            store["box"].append(out[1])
+            store["h"].append(out[2])
+            store["added"] += 1
+        self.replicas[r].reset = (pos, None if box is None else box.copy(),
+                                  int(self.seed_rng.integers(1, 2**31 - 1)))
+        self.replicas[r].origin = k
 
     def _report(self, t_start: float, c_start: int, time_ps: float) -> None:
         o = self.options
