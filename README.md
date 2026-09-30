@@ -177,10 +177,15 @@ The exchange is the general independence move
 
 with u the reduced potential of the top state and of the reservoir, which
 for temperature REMD is the criterion above. REST2 needs a NonbondedForce:
-explicit solvent or vacuum, not implicit-solvent GB. The long-range
-dispersion correction is scaled with the solute like the pairs it stands
-for (with OpenMM 8.3 or later), so at constant pressure every state's
-barostat feels its own Hamiltonian.
+explicit solvent or vacuum, not implicit-solvent GB. At constant volume
+the long-range dispersion correction is a constant of each state that
+cancels from every exchange and estimate, and is left as OpenMM computes
+it. At constant pressure it is scaled with the solute like the pairs it
+stands for (with OpenMM 8.3 or later), so every state's barostat feels its
+own Hamiltonian; OpenMM evaluates that term on the host, which slows a GPU,
+so equilibrate at constant pressure and run REST2 at constant volume. The
+same holds for a reservoir generated with REST2 scaling, which shares the
+run's ensemble.
 
 ### What is checked before a run starts
 

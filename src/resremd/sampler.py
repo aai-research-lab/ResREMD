@@ -231,7 +231,12 @@ class _Run:
 
             solute = select_atoms(self.prepared.topology,
                                   o["rest2_selection"], o["rest2_atoms"])
-            system, info = rest2_system(system, solute)
+            _, ensemble = simulated_system(
+                system, ensemble=o["ensemble"], pressure_bar=o["pressure_bar"],
+                temperature_K=self.temperatures[0],
+                frequency=o["barostat_frequency"])
+            system, info = rest2_system(
+                system, solute, constant_pressure=ensemble.constant_pressure)
             # What the replicas simulate, for keys of energies computed with
             # it: the scaled System changes with this package's version.
             info["system_sha256"] = system_digest(system)
@@ -379,6 +384,16 @@ class _Run:
         logger.info("%d replicas, %s", n, ", ".join(
             f"{t:.2f}" for t in self.temperatures) + " K")
         logger.info("Engine: %s", self.engine.describe())
+        if self.rest2 is not None and \
+                self.rest2["dispersion_correction"] == "scaled" and \
+                self.engine.platform in ("CUDA", "HIP", "OpenCL"):
+            text = ("At constant pressure REST2 scales the dispersion "
+                    "correction through a CustomVolumeForce, which OpenMM "
+                    "evaluates on the host: every step then waits on a round "
+                    "trip to the GPU. Equilibrating at constant pressure and "
+                    "running REST2 at constant volume avoids it.")
+            logger.warning(text)
+            self.warnings.append(text)
         # Signals are taken from here on, so a stop requested while reservoir
         # energies are computed or replicas equilibrate is honoured too.
         with StopRequests() as self.stop:
@@ -564,7 +579,27 @@ class _Run:
                     self.plan["cycles"])
 
     def _check_resumable(self, meta: dict[str, Any]) -> None:
-        before = meta["fingerprint"]
+        from .thermo import Ensemble
+
+        before = dict(meta["fingerprint"])
+        old = before.get("rest2_dispersion")
+        # Only a constant-volume run resumed at constant volume; a change of
+        # ensemble is reported as one below.
+        was_nvt = not Ensemble.from_dict(before.get("ensemble")
+                                         ).constant_pressure
+        if was_nvt and not self.ensemble.constant_pressure:
+            if old == "unscaled":
+                # An OpenMM without CustomVolumeForce left the correction to
+                # the NonbondedForce, as constant volume now does anyway.
+                before["rest2_dispersion"] = None
+            elif old == "scaled":
+                raise ResumeError(
+                    "This REST2 run was started by an earlier ResREMD, which "
+                    "scaled the dispersion correction at constant volume. "
+                    "Sampling is the same either way, but the energies in "
+                    "rest2_terms.csv would mix two conventions and bias MBAR "
+                    "and pilot predictions. Start a new run in another "
+                    "directory.", code="resremd.resume.mismatch")
         # Settings added since a run was started read as their defaults.
         added = {"rest2": False, "reservoir_reweight": False,
                  "rest2_solute": None, "rest2_dispersion": None,

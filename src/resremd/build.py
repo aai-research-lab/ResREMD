@@ -77,11 +77,17 @@ def generate(prepared: Prepared | str | Path | None = None, *,
         t_sim = float(o["rest2_run_temperature_K"])
         solute = select_atoms(prep.topology, o["rest2_selection"],
                               o["rest2_atoms"])
-        base_system, info = rest2_system(prep.system, solute)
+        _, ens = simulated_system(
+            prep.system, ensemble=o["ensemble"],
+            pressure_bar=o["pressure_bar"], temperature_K=t_sim,
+            frequency=o["barostat_frequency"])
+        base_system, info = rest2_system(
+            prep.system, solute, constant_pressure=ens.constant_pressure)
         rest2_meta = {"scale": scale_of(t_sim, t),
                       "simulation_temperature_K": t_sim,
                       "solute_sha256": solute_digest(solute),
-                      "solute_atoms": info["solute_atoms"]}
+                      "solute_atoms": info["solute_atoms"],
+                      "dispersion_correction": info["dispersion_correction"]}
     sim_system, ensemble = simulated_system(
         base_system, ensemble=o["ensemble"], pressure_bar=o["pressure_bar"],
         temperature_K=t_sim, frequency=o["barostat_frequency"])
@@ -106,6 +112,33 @@ def generate(prepared: Prepared | str | Path | None = None, *,
             raise ResumeError(f"There is no unfinished build in {out}.",
                               code="resremd.resume.missing")
         meta = json.loads(meta_file.read_text())
+        saved_rest2 = meta.get("rest2")
+        if rest2_meta is not None and saved_rest2 is not None and \
+                saved_rest2.get("dispersion_correction") != \
+                rest2_meta["dispersion_correction"]:
+            if "dispersion_correction" not in saved_rest2 and \
+                    rest2_meta["dispersion_correction"] in ("none",
+                                                            "unchanged"):
+                # No correction on the solute: nothing changed.
+                saved_rest2 = {**saved_rest2, "dispersion_correction":
+                               rest2_meta["dispersion_correction"]}
+                meta["rest2"] = saved_rest2
+            elif "dispersion_correction" not in saved_rest2:
+                raise ResumeError(
+                    "This REST2 build was started by an earlier ResREMD, "
+                    "whose handling of the dispersion correction cannot be "
+                    "told from its records, so the energies recorded for its "
+                    "frames might mix two conventions. Start the build again "
+                    "in a new directory.", code="resremd.resume.mismatch")
+            else:
+                raise ResumeError(
+                    "The REST2 build in progress handled the dispersion "
+                    f"correction as {saved_rest2['dispersion_correction']!r} "
+                    f"and would now handle it as "
+                    f"{rest2_meta['dispersion_correction']!r}: the ensemble, "
+                    "the System's nonbonded settings or the OpenMM version "
+                    "changed. Resume with the same ones, or start again.",
+                    code="resremd.resume.mismatch")
         if meta["n_frames"] != n_frames \
                 or meta["source"].get("frame_interval_steps") != interval \
                 or meta["source"].get("timestep_fs") != dt \

@@ -17,16 +17,20 @@ solute by s^2, and those reaching outside it by s. Bonds and angles are not
 scaled.
 
 OpenMM does not apply parameter offsets to the long-range dispersion
-correction. With the correction on, it is moved out of the NonbondedForce
-into a CustomVolumeForce that scales it as the pairs it stands for: the
-solute's own pairs by s^2, its pairs with the solvent by s. Its
-coefficients come from OpenMM's own correction for the solute's well
-depths scaled to s = 1, 0.5 and 0, so at s = 1 it is the original term. At
-constant volume the correction is the same for every configuration of a
-state and cancels from every exchange; at constant pressure it acts on the
-barostat. With an OpenMM older than 8.3, which has no CustomVolumeForce,
-the correction stays unscaled at every state (exact for that Hamiltonian,
-a small departure from Wang et al.'s at constant pressure).
+correction. At constant volume that does not matter: the correction is a
+constant of each state, the same for every configuration, so it cancels
+from every exchange and every reweighting, and it is left as OpenMM
+computes it. At constant pressure it acts on the barostat, and it is moved
+out of the NonbondedForce into a CustomVolumeForce that scales it as the
+pairs it stands for: the solute's own pairs by s^2, its pairs with the
+solvent by s. Its coefficients come from OpenMM's own correction for the
+solute's well depths scaled to s = 1, 0.5 and 0, so at s = 1 it is the
+original term. OpenMM evaluates a CustomVolumeForce on the host, which
+costs a GPU a round trip every step; equilibrating at constant pressure and
+running REST2 at constant volume avoids it. With an OpenMM older than 8.3,
+which has no CustomVolumeForce, the correction stays unscaled at constant
+pressure too (exact for that Hamiltonian, a small departure from Wang et
+al.'s).
 
 The potential energy of any configuration is then exactly quadratic in s,
 
@@ -76,11 +80,14 @@ def solute_digest(atoms: np.ndarray) -> str:
         [int(a) for a in atoms]).encode()).hexdigest()
 
 
-def rest2_system(system: Any, solute: np.ndarray) -> tuple[Any, dict]:
+def rest2_system(system: Any, solute: np.ndarray, *,
+                 constant_pressure: bool = False) -> tuple[Any, dict]:
     """A copy of ``system`` whose solute interactions scale with the REST2
     global parameters (at s = 1 it is the original System).
 
-    Refuses forces that act on the solute and cannot be scaled.
+    With ``constant_pressure`` the dispersion correction is scaled too (see
+    the module's description). Refuses forces that act on the solute and
+    cannot be scaled.
     """
     import openmm
 
@@ -107,7 +114,8 @@ def rest2_system(system: Any, solute: np.ndarray) -> tuple[Any, dict]:
                 code="resremd.input.rest2")
     for f in forces:
         if isinstance(f, openmm.NonbondedForce):
-            _scale_dispersion_correction(system, f, hot, info)
+            _scale_dispersion_correction(system, f, hot, info,
+                                         constant_pressure)
             _scale_nonbonded(f, hot, info)
     for index in reversed(range(system.getNumForces())):
         f = system.getForce(index)
@@ -204,7 +212,7 @@ def dispersion_coefficient(force: Any, epsilon_scale: np.ndarray) -> float:
 
 
 def _scale_dispersion_correction(system: Any, f: Any, hot: np.ndarray,
-                                 info: dict) -> None:
+                                 info: dict, constant_pressure: bool) -> None:
     import openmm
 
     method = f.getNonbondedMethod()
@@ -214,6 +222,10 @@ def _scale_dispersion_correction(system: Any, f: Any, hot: np.ndarray,
     if not any(f.getParticleParameters(int(i))[2]._value != 0.0
                for i in np.flatnonzero(hot)):
         info["dispersion_correction"] = "unchanged"
+        return
+    if not constant_pressure:
+        # A constant of each state at fixed volume: it cancels everywhere.
+        info["dispersion_correction"] = "constant"
         return
     if not hasattr(openmm, "CustomVolumeForce"):
         info["dispersion_correction"] = "unscaled"

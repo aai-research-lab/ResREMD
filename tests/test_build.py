@@ -525,3 +525,37 @@ def test_structures_with_a_box_suit_a_system_without_one(tmp_path):
                                     output=str(tmp_path / "r"),
                                     kind="non_boltzmann")
     assert not meta["periodic"]
+
+
+def test_a_rest2_build_from_before_the_constant_volume_change_is_refused(
+        tmp_path):
+    """Its recorded energies used the other convention for the dispersion
+    correction; resuming would mix the two."""
+    import json
+
+    from resremd.errors import ResumeError
+
+    def stop(info):
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    # A small box and a long step reach the first checkpoint (0.5 ns) fast.
+    box = testsystems.lj_box(n_side=3)
+    common = dict(output=str(tmp_path / "r"), temperature_K=200.0,
+                  rest2_run_temperature_K=100.0, rest2_atoms=list(range(5)),
+                  duration_ns=0.6, frame_interval_steps=500, timestep_fs=8.0,
+                  equilibration_ns=0.0, platform="Reference", random_seed=2,
+                  minimize=False)
+    meta = resremd.generate_reservoir(box, on_progress=stop, **common)
+    assert not meta["complete"]
+    assert meta["rest2"]["dispersion_correction"] == "constant"
+    path = tmp_path / "r/reservoir.json"
+    saved = json.loads(path.read_text())
+    del saved["rest2"]["dispersion_correction"]
+    path.write_text(json.dumps(saved))
+    with pytest.raises(ResumeError, match="earlier ResREMD"):
+        resremd.generate_reservoir(box, resume=True, **common)
+    # A known but different convention says what changed.
+    saved["rest2"]["dispersion_correction"] = "scaled"
+    path.write_text(json.dumps(saved))
+    with pytest.raises(ResumeError, match="'scaled'"):
+        resremd.generate_reservoir(box, resume=True, **common)

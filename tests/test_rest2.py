@@ -28,7 +28,11 @@ def _context(system):
                           openmm.Platform.getPlatformByName("Reference"))
 
 
-def test_energy_is_quadratic_in_the_scale_and_exact_at_one():
+@pytest.mark.parametrize("constant_pressure", [False, True])
+def test_energy_is_quadratic_in_the_scale_and_exact_at_one(
+        constant_pressure):
+    """At constant volume the dispersion correction is left to OpenMM, a
+    constant of each state; at constant pressure it is scaled."""
     from openmm import app, unit
 
     top, pos = testsystems.alanine_dipeptide()
@@ -40,8 +44,11 @@ def test_energy_is_quadratic_in_the_scale_and_exact_at_one():
                              constraints=app.HBonds)
     solute = [a.index for a in mod.topology.atoms()
               if a.residue.name != "HOH"]
-    scaled, info = rest2.rest2_system(system, np.array(solute))
+    scaled, info = rest2.rest2_system(system, np.array(solute),
+                                      constant_pressure=constant_pressure)
     assert info["nonbonded"] and info["torsions_scaled"] > 0
+    volume_forces = [f for f in scaled.getForces()
+                     if f.getName() == "REST2 dispersion correction"]
     x = np.array(mod.positions.value_in_unit(unit.nanometer))
     plain = _context(system)
     plain.setPositions(x)
@@ -57,7 +64,10 @@ def test_energy_is_quadratic_in_the_scale_and_exact_at_one():
     terms = rest2.fit([1.0, 0.0, 0.5], [u(1.0), u(0.0), u(0.5)])
     for s in (0.3, 0.7, 0.9):
         assert rest2.energy(terms, s) == pytest.approx(u(s), abs=1e-2)
-    if hasattr(openmm, "CustomVolumeForce"):
+    if not constant_pressure:
+        assert info["dispersion_correction"] == "constant"
+        assert not volume_forces
+    elif hasattr(openmm, "CustomVolumeForce"):
         assert info["dispersion_correction"] == "scaled"
         _check_dispersion_correction(system, scaled, solute, x)
 
@@ -244,9 +254,7 @@ def test_constant_pressure_rest2_scales_the_dispersion_correction(tmp_path):
 def test_reservoir_energies_are_not_reused_across_rest2_systems(
         tmp_path, monkeypatch):
     """The cache of a reservoir's REST2 energies is keyed by the scaled
-    System itself: one built with another scaling is never reused."""
-    if not hasattr(openmm, "CustomVolumeForce"):
-        pytest.skip("needs OpenMM 8.3 or later")
+    System itself: one built another way is never reused."""
     rng = np.random.default_rng(0)
     base = testsystems.lj_box()
     frames = base.positions[None] + rng.normal(0, 0.01, (20, 125, 3))
@@ -260,12 +268,114 @@ def test_reservoir_energies_are_not_reused_across_rest2_systems(
                   production_steps=50, timestep_fs=4.0, platform="Reference",
                   random_seed=1, equilibration_ns=0.0, save_selection="all",
                   reservoir=str(tmp_path / "r"))
-    real = rest2._scale_dispersion_correction
-    monkeypatch.setattr(rest2, "_scale_dispersion_correction",
-                        lambda *a: None)
-    resremd.run(testsystems.lj_box(), output=str(tmp_path / "old"), **common)
-    monkeypatch.setattr(rest2, "_scale_dispersion_correction", real)
-    resremd.run(testsystems.lj_box(), output=str(tmp_path / "new"), **common)
-    old = np.load(tmp_path / "old/reservoir_delta.npy")
-    new = np.load(tmp_path / "new/reservoir_delta.npy")
-    assert np.ptp(new - old) < 1e-6 and abs(np.mean(new - old)) > 0.1
+    real = rest2.rest2_system
+
+    def another(system, solute, **kw):
+        # The same energies from a System that serialises differently.
+        scaled, info = real(system, solute, **kw)
+        scaled.addForce(openmm.CustomExternalForce("0"))
+        return scaled, info
+
+    def caches():
+        return len(list((tmp_path / "r/energies").glob("*.npz")))
+
+    monkeypatch.setattr(rest2, "rest2_system", another)
+    resremd.run(testsystems.lj_box(), output=str(tmp_path / "a"), **common)
+    assert caches() == 1
+    monkeypatch.setattr(rest2, "rest2_system", real)
+    resremd.run(testsystems.lj_box(), output=str(tmp_path / "b"), **common)
+    assert caches() == 2
+    resremd.run(testsystems.lj_box(), output=str(tmp_path / "c"), **common)
+    assert caches() == 2
+
+
+def _nvt_rest2_run(tmp_path, name, **extra):
+    common = dict(rest2=True, rest2_atoms=list(range(20)),
+                  temperatures_K=[100.0, 130.0, 170.0],
+                  exchange_interval_steps=50, timestep_fs=4.0,
+                  platform="Reference", random_seed=3, equilibration_ns=0.0,
+                  save_selection="all")
+    common.update(extra)
+    return resremd.run(testsystems.lj_box(), output=str(tmp_path / name),
+                       **common)
+
+
+def test_at_constant_volume_scaling_the_correction_changes_nothing(
+        tmp_path, monkeypatch):
+    """The correction is a constant of each state at fixed volume: scaling
+    it or not gives the same exchanges, the same reservoir decisions, and
+    energies that differ by a constant per state."""
+    resremd.generate_reservoir(
+        testsystems.lj_box(), output=str(tmp_path / "r"), temperature_K=170.0,
+        duration_ns=0.024, frame_interval_steps=100, timestep_fs=4.0,
+        equilibration_ns=0.02, platform="Reference", random_seed=4,
+        minimize=False)
+    run = dict(production_steps=50 * 60, reservoir=str(tmp_path / "r"))
+    m = _nvt_rest2_run(tmp_path, "new", **run)
+    assert m["rest2"]["dispersion_correction"] == "constant"
+    real = rest2.rest2_system
+    monkeypatch.setattr(rest2, "rest2_system",
+                        lambda s, solute, **kw: real(s, solute,
+                                                     constant_pressure=True))
+    m = _nvt_rest2_run(tmp_path, "old", **run)
+    assert m["rest2"]["dispersion_correction"] == "scaled"
+    def table(name, columns):
+        return [np.loadtxt(tmp_path / which / name, delimiter=",",
+                           skiprows=1, usecols=columns)
+                for which in ("new", "old")]
+
+    new, old = table("states.csv", (2, 3, 4))
+    assert np.array_equal(new, old)
+    # replica, frame, log acceptance, accepted
+    new, old = table("reservoir_exchanges.csv", (2, 3, 6, 7))
+    assert 0 < new[:, 3].sum() < len(new)
+    assert np.array_equal(new[:, [0, 1, 3]], old[:, [0, 1, 3]])
+    assert np.allclose(new[:, 2], old[:, 2], atol=1e-8)
+    dn = np.load(tmp_path / "new/reservoir_delta.npy")
+    do = np.load(tmp_path / "old/reservoir_delta.npy")
+    assert np.ptp(dn - do) < 1e-8 and abs(np.mean(dn - do)) > 1e-3
+
+
+def test_a_run_from_before_the_constant_volume_change_is_not_resumed(
+        tmp_path):
+    """Runs that scaled the correction at constant volume would mix two
+    conventions in rest2_terms.csv; ones that left it unscaled match."""
+    from resremd.errors import ResumeError
+
+    _nvt_rest2_run(tmp_path, "run", production_steps=100)
+    chk = tmp_path / "run/checkpoint.npz"
+    with np.load(chk) as data:
+        arrays = {k: np.array(data[k]) for k in data.files}
+    meta = json.loads(str(arrays["meta"]))
+    assert meta["fingerprint"]["rest2_dispersion"] is None
+    for old, refused in (("scaled", True), ("unscaled", False)):
+        meta["fingerprint"]["rest2_dispersion"] = old
+        arrays["meta"] = np.array(json.dumps(meta))
+        np.savez(chk, **arrays)
+        if refused:
+            with pytest.raises(ResumeError, match="earlier ResREMD"):
+                _nvt_rest2_run(tmp_path, "run", production_steps=200,
+                               resume=True)
+        else:
+            m = _nvt_rest2_run(tmp_path, "run", production_steps=200,
+                               resume=True)
+            assert m["status"] == "complete"
+
+
+def test_a_changed_ensemble_is_reported_as_one(tmp_path):
+    """A constant-pressure REST2 run resumed at constant volume is refused
+    for its ensemble, not as a run from an earlier version."""
+    from resremd.errors import ResumeError
+
+    common = dict(rest2=True, rest2_atoms=list(range(20)),
+                  temperatures_K=[100.0, 150.0], exchange_interval_steps=50,
+                  timestep_fs=4.0, platform="Reference", random_seed=1,
+                  equilibration_ns=0.0, save_selection="all")
+    resremd.run(testsystems.lj_box(pressure=True),
+                output=str(tmp_path / "run"), production_steps=100, **common)
+    with pytest.raises(ResumeError) as error:
+        resremd.run(testsystems.lj_box(pressure=True),
+                    output=str(tmp_path / "run"), production_steps=200,
+                    resume=True, ensemble="nvt", **common)
+    assert "ensemble" in str(error.value)
+    assert "earlier ResREMD" not in str(error.value)
