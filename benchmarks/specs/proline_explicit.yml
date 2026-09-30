@@ -25,17 +25,16 @@ methods:
                  frame_interval_steps: 2500,
                  bias_torsions: [{atoms: omega, energy: "-k*sin(theta)^2",
                                   parameters: {k: 60.0}}]}
-  # REST2 heats only the solute, so a few replicas span a wide range.
-  # A short CPU pilot gave 15 to 45 percent neighbour acceptance. Tune it
-  # on a longer pilot with `resremd ladder --from-pilot`.
+  # REST2 heats only the solute, so a few replicas span a wide range. This
+  # ladder was tuned by `resremd ladder --from-pilot` on a 0.3 ns CPU pilot
+  # for 33 percent acceptance, and gave 29 to 35 percent; retune on a longer
+  # pilot on the GPU used for the benchmark.
   - name: rest2
-    temperatures_K: [300.0, 417.0, 580.0, 806.0, 1121.0, 1558.0, 2166.0,
-                     3000.0]
+    temperatures_K: [300.0, 388.5, 521.0, 731.5, 1099.3, 1734.7, 3000.0]
     run: {rest2: true}
   - name: rest2_res
     note: REST2 with a reservoir of its own top state, stopping itself
-    temperatures_K: [300.0, 417.0, 580.0, 806.0, 1121.0, 1558.0, 2166.0,
-                     3000.0]
+    temperatures_K: [300.0, 388.5, 521.0, 731.5, 1099.3, 1734.7, 3000.0]
     run: {rest2: true}
     reservoir:
       generate: {temperature_K: 3000.0, rest2_run_temperature_K: 300.0,
