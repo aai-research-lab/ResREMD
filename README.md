@@ -324,6 +324,16 @@ is counted twice. Reservoir builds stop and resume the same way.
   many contexts as replicas, replicas never leave the GPU and an exchange
   changes only their temperature. With fewer, replicas share contexts and
   are swapped in and out. The default is up to 4 on a GPU and 1 on the CPU.
+- To choose, time the system itself:
+  ```
+  resremd throughput --prepared setup --n-replicas 8 \
+      --contexts-per-device 1 2 4 8 --platform CUDA
+  ```
+  This prints ns/day per replica and in total for each count, and the share
+  of a cycle spent outside dynamics. If the total still grows at the
+  largest count, the device has room for more contexts; if the overhead
+  share is large, a longer `exchange_interval_steps` pays more than
+  hardware. `--rest2` times REST2 replicas.
 
 ## Validation
 

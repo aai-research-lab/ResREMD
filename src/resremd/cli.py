@@ -177,6 +177,33 @@ def build_parser() -> argparse.ArgumentParser:
                        help="A finished or stopped run to tune on.")
     p_lad.add_argument("--target-acceptance", type=float, default=0.3,
                        help="With --from-pilot (default 0.3).")
+    p_thr = sub.add_parser(
+        "throughput", help="Time a prepared system's replicas for several "
+                           "numbers of contexts per device.",
+        description="Time cycles of the run's engine for each number of "
+                    "contexts per device: ns/day per replica and in total, "
+                    "and the share of a cycle that is not dynamics. Use it "
+                    "to choose `contexts_per_device` and the exchange "
+                    "interval on a GPU.")
+    p_thr.add_argument("--prepared", required=True, metavar="DIR")
+    p_thr.add_argument("--n-replicas", type=int, default=8)
+    p_thr.add_argument("--contexts-per-device", type=int, nargs="+",
+                       default=[1, 2, 4, 8], metavar="N")
+    p_thr.add_argument("--steps", type=int, default=500,
+                       help="MD steps per cycle, the exchange interval "
+                            "(default 500).")
+    p_thr.add_argument("--cycles", type=int, default=10)
+    p_thr.add_argument("--timestep-fs", type=float, default=2.0)
+    p_thr.add_argument("--platform", default="auto")
+    p_thr.add_argument("--precision", default="mixed",
+                       choices=("mixed", "single", "double"))
+    p_thr.add_argument("--devices", type=int, nargs="+", metavar="INDEX")
+    p_thr.add_argument("--rest2", action="store_true",
+                       help="Time REST2 replicas, with their extra energy "
+                            "evaluations.")
+    p_thr.add_argument("--rest2-selection", default="solute",
+                       choices=("all", "not water", "solute"))
+    p_thr.add_argument("--json", action="store_true")
     return parser
 
 
@@ -211,6 +238,18 @@ def main(argv: list[str] | None = None) -> int:
             schema = {"run": RUN, "generate": GENERATE,
                       "import": IMPORT, "cluster": CLUSTER}[args.which]
             print(template(schema))
+        elif args.command == "throughput":
+            from .throughput import format_rows, measure
+
+            rows = measure(args.prepared, n_replicas=args.n_replicas,
+                           contexts_per_device=args.contexts_per_device,
+                           steps=args.steps, cycles=args.cycles,
+                           timestep_fs=args.timestep_fs,
+                           platform=args.platform, precision=args.precision,
+                           devices=args.devices, rest2=args.rest2,
+                           rest2_selection=args.rest2_selection)
+            print(json.dumps(rows, indent=2) if args.json
+                  else format_rows(rows, args.n_replicas))
         elif args.command == "ladder":
             from .ladder import from_pilot, geometric
 
