@@ -25,10 +25,11 @@ out of the NonbondedForce into a CustomVolumeForce that scales it as the
 pairs it stands for: the solute's own pairs by s^2, its pairs with the
 solvent by s. Its coefficients come from OpenMM's own correction for the
 solute's well depths scaled to s = 1, 0.5 and 0, so at s = 1 it is the
-original term. OpenMM evaluates a CustomVolumeForce on the host, which
-costs a GPU a round trip every step; equilibrating at constant pressure and
-running REST2 at constant volume avoids it. With an OpenMM older than 8.3,
-which has no CustomVolumeForce, the correction stays unscaled at constant
+original term. OpenMM releases 8.3 to 8.6 evaluate a CustomVolumeForce
+as a CustomCPPForce, copying positions and forces between a GPU and the
+host every step; with them, equilibrating at constant pressure and running
+REST2 at constant volume avoids it. With an OpenMM older than 8.3, which
+has no CustomVolumeForce, the correction stays unscaled at constant
 pressure too (exact for that Hamiltonian, a small departure from Wang et
 al.'s).
 
@@ -78,6 +79,29 @@ def scale_of(temperature_K: float, effective_K: float) -> float:
 def solute_digest(atoms: np.ndarray) -> str:
     return hashlib.sha256(json.dumps(
         [int(a) for a in atoms]).encode()).hexdigest()
+
+
+def gpu_round_trip_warning(platform: str, then: str) -> str | None:
+    """The warning for a dispersion correction scaled at constant pressure
+    on a GPU, or None where it costs nothing. OpenMM releases 8.3 to 8.6
+    evaluate a CustomVolumeForce as a CustomCPPForce, on the host; OpenMM's
+    development branch no longer does since 2026-09-28, but its builds
+    report 8.6 too and are warned all the same."""
+    import openmm
+
+    if platform not in ("CUDA", "HIP", "OpenCL"):
+        return None
+    try:
+        version = tuple(int(v) for v in openmm.__version__.split(".")[:2])
+    except ValueError:
+        version = (8, 6)
+    if version > (8, 6):
+        return None
+    return ("At constant pressure REST2 scales the dispersion correction "
+            "through a CustomVolumeForce, which OpenMM releases 8.3 to 8.6 "
+            "evaluate on the host: every step copies positions and forces "
+            "between the GPU and the host. Equilibrating at constant "
+            "pressure and " + then + " at constant volume avoids it.")
 
 
 def rest2_system(system: Any, solute: np.ndarray, *,

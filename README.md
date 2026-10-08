@@ -182,10 +182,10 @@ the long-range dispersion correction is a constant of each state that
 cancels from every exchange and estimate, and is left as OpenMM computes
 it. At constant pressure it is scaled with the solute like the pairs it
 stands for (with OpenMM 8.3 or later), so every state's barostat feels its
-own Hamiltonian; OpenMM evaluates that term on the host, which slows a GPU,
-so equilibrate at constant pressure and run REST2 at constant volume. The
-same holds for a reservoir generated with REST2 scaling, which shares the
-run's ensemble.
+own Hamiltonian. OpenMM releases 8.3 to 8.6 evaluate that term on the
+host, which slows a GPU; with them, equilibrate at constant pressure and
+run REST2 at constant volume. The same holds for a reservoir generated with
+REST2 scaling, which shares the run's ensemble.
 
 ### What is checked before a run starts
 

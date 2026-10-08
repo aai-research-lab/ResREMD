@@ -385,14 +385,14 @@ class _Run:
         logger.info("%d replicas, %s", n, ", ".join(
             f"{t:.2f}" for t in self.temperatures) + " K")
         logger.info("Engine: %s", self.engine.describe())
+        text = None
         if self.rest2 is not None and \
-                self.rest2["dispersion_correction"] == "scaled" and \
-                self.engine.platform in ("CUDA", "HIP", "OpenCL"):
-            text = ("At constant pressure REST2 scales the dispersion "
-                    "correction through a CustomVolumeForce, which OpenMM "
-                    "evaluates on the host: every step then waits on a round "
-                    "trip to the GPU. Equilibrating at constant pressure and "
-                    "running REST2 at constant volume avoids it.")
+                self.rest2["dispersion_correction"] == "scaled":
+            from .rest2 import gpu_round_trip_warning
+
+            text = gpu_round_trip_warning(self.engine.platform,
+                                          "running REST2")
+        if text:
             logger.warning(text)
             self.warnings.append(text)
         # Signals are taken from here on, so a stop requested while reservoir

@@ -126,11 +126,16 @@ def generate(prepared: Prepared | str | Path | None = None, *,
                 code="resremd.resume.mismatch")
         if before.as_dict() != ensemble.as_dict():
             now = ensemble.describe()
-            if was == now:  # settings past the precision shown
+            if was == now:  # settings the description does not show
                 old, new = before.as_dict(), ensemble.as_dict()
-                was, now = (", ".join(f"{k} {d[k]!r}" for k in old
+                was, now = (", ".join(f"{k} = {d[k]!r}" for k in old
                                       if old[k] != new[k])
                             for d in (old, new))
+                raise ResumeError(
+                    f"The build in progress was started with {was}, and "
+                    f"would now go on with {now}. Resume in the same "
+                    "ensemble, or start again in a new directory.",
+                    code="resremd.resume.mismatch")
             raise ResumeError(
                 f"The build in progress was started at {was}, and would now "
                 f"go on at {now}. Resume in the same ensemble, or start "
@@ -248,13 +253,12 @@ def generate(prepared: Prepared | str | Path | None = None, *,
     meta["source"]["platform"] = platform
     warn_if_no_gpu(o["platform"], platform)
     if rest2_meta is not None and \
-            rest2_meta["dispersion_correction"] == "scaled" and \
-            platform in ("CUDA", "HIP", "OpenCL"):
-        logger.warning(
-            "At constant pressure REST2 scales the dispersion correction "
-            "through a CustomVolumeForce, which OpenMM evaluates on the host: "
-            "every step then waits on a round trip to the GPU. Equilibrating "
-            "at constant pressure and building at constant volume avoids it.")
+            rest2_meta["dispersion_correction"] == "scaled":
+        from .rest2 import gpu_round_trip_warning
+
+        text = gpu_round_trip_warning(platform, "building")
+        if text:
+            logger.warning(text)
     if ensemble.temperature_parameter:
         # A barostat that came with the System was made for some other
         # temperature. Left there, it would accept volume moves as if at that

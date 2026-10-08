@@ -639,7 +639,7 @@ def test_a_build_is_not_resumed_in_another_ensemble(tmp_path):
                               temperature_K=100.0, frequency=25)
     path.write_text(json.dumps({**saved, "ensemble": {
         **npt.as_dict(), "pressure_bar": npt.pressure_bar * (1 + 1e-9)}}))
-    with pytest.raises(ResumeError, match="started at pressure_bar "):
+    with pytest.raises(ResumeError, match="started with pressure_bar = "):
         resremd.generate_reservoir(box, resume=True, ensemble="npt",
                                    **common)
     path.write_text(kept)
@@ -649,8 +649,12 @@ def test_a_build_is_not_resumed_in_another_ensemble(tmp_path):
 
 def test_a_rest2_build_at_constant_pressure_on_a_gpu_is_warned_of(
         tmp_path, monkeypatch, caplog):
+    import openmm
+
     from resremd import build
 
+    # The OpenMM releases that evaluate a CustomVolumeForce on the host.
+    monkeypatch.setattr(openmm, "__version__", "8.6.1")
     real = build.create_context
 
     def on_a_gpu(*args, **kwargs):
