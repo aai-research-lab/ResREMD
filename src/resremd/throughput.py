@@ -38,9 +38,10 @@ def measure(prepared: Any, *, contexts_per_device: list[int] | None = None,
     process that fails as it exits, after its row is in, is reported rather
     than taking the table with it. Like any use of multiprocessing, a script
     that sets ``isolate`` needs an ``if __name__ == "__main__":`` guard and
-    must be read from a file. A SIGTERM that would end this process first
-    stops the timing process; a SIGTERM handler of the caller's own is left
-    to decide. Other settings are those of :func:`_measure`.
+    cannot be read from standard input. A SIGTERM that would end this
+    process first stops the timing process; a SIGTERM handler of the
+    caller's own is left to decide. Other settings are those of
+    :func:`_measure`.
     """
     import inspect
     import numbers
@@ -62,7 +63,10 @@ def measure(prepared: Any, *, contexts_per_device: list[int] | None = None,
 
     counts = [1, 2, 4, 8] if contexts_per_device is None \
         else contexts_per_device
-    counts = list(counts) if hasattr(counts, "__iter__") else [counts]
+    try:
+        counts = list(counts)
+    except TypeError:  # one count
+        counts = [counts]
     if not counts:
         raise InputError("contexts_per_device names no count to time.",
                          code="resremd.input.range")
@@ -134,28 +138,29 @@ def _stoppable(source: Any, counts: list[int],
     spawn = multiprocessing.get_context("spawn")
     if threading.current_thread() is not threading.main_thread() or \
             signal.getsignal(signal.SIGTERM) is not signal.SIG_DFL:
-        # A caller's own handler decides; one that raises or exits still
-        # stops the timing process on the way out.
+        # Handlers can be set only from the main thread, and a caller's own
+        # handler decides: one that raises or exits still stops the timing
+        # process on the way out.
         return _isolated(spawn, source, counts, settings, {})
-    state = {"starting": False, "signal": None, "raised": False}
+    state = {"signal": None}
 
     def stop(number, _frame):
-        # A second signal, or one while a process is being started, is
-        # only noted: the cleanup it would cut short must finish.
+        # Only noted, and acted on where the timing loop looks (at least
+        # once a second): raised here it could land anywhere, in a process
+        # being started or a finalizer that would swallow it.
         state["signal"] = number
-        if not state["starting"] and not state["raised"]:
-            state["raised"] = True
-            raise _Stopped
 
-    signal.signal(signal.SIGTERM, stop)
+    rows = None
     try:
-        return _isolated(spawn, source, counts, settings, state)
+        signal.signal(signal.SIGTERM, stop)
+        rows = _isolated(spawn, source, counts, settings, state)
     except _Stopped:
         pass
     finally:
         signal.signal(signal.SIGTERM, signal.SIG_DFL)
-    logger.warning("Stopped by SIGTERM; the timing process was stopped "
-                   "first.")
+    if state["signal"] is None:
+        return rows
+    logger.warning("Stopped by SIGTERM.")
     # The signal then does what it would have done.
     os.kill(os.getpid(), signal.SIGTERM)
     raise SystemExit(128 + signal.SIGTERM)
@@ -165,9 +170,15 @@ def _isolated(spawn: Any, source: Any, counts: list[int],
               settings: dict[str, Any],
               state: dict[str, Any]) -> list[dict[str, Any]]:
     import queue as queues
+    import signal
+
+    def check() -> None:
+        if state.get("signal") is not None:
+            raise _Stopped
 
     rows = []
     for count in counts:
+        check()
         channel = spawn.Queue()
         # A directory is read again by the process; a System travels as XML.
         worker = spawn.Process(target=_worker,
@@ -176,7 +187,7 @@ def _isolated(spawn: Any, source: Any, counts: list[int],
         result = None
         hung = False
         try:
-            state["starting"] = True
+            check()
             try:
                 worker.start()
             except Exception as exc:  # a System that cannot be sent
@@ -185,12 +196,8 @@ def _isolated(spawn: Any, source: Any, counts: list[int],
                 logger.warning("Timing %d contexts per device could not "
                                "start: %s", count, exc)
                 continue
-            finally:
-                state["starting"] = False
-            if state.get("signal") is not None and not state["raised"]:
-                state["raised"] = True
-                raise _Stopped
             while result is None:
+                check()
                 try:
                     result = channel.get(timeout=1.0)
                 except queues.Empty:
@@ -200,7 +207,11 @@ def _isolated(spawn: Any, source: Any, counts: list[int],
                         except queues.Empty:
                             break
             # A process stuck in teardown after reporting is not waited on.
-            worker.join(timeout=120)
+            for _ in range(120):
+                check()
+                worker.join(timeout=1.0)
+                if not worker.is_alive():
+                    break
             hung = worker.is_alive()
         finally:
             if worker.is_alive():
@@ -209,7 +220,15 @@ def _isolated(spawn: Any, source: Any, counts: list[int],
                 if worker.is_alive():
                     worker.kill()
                     worker.join()
-        if result is None:
+        if result is None and (worker.exitcode or 0) < 0:
+            try:
+                name = signal.Signals(-worker.exitcode).name
+            except ValueError:
+                name = f"signal {-worker.exitcode}"
+            result = ("error", f"the process was ended by {name} before it "
+                               "reported; possible causes are a crash in the "
+                               "platform or a signal from outside")
+        elif result is None:
             result = ("error", f"the process ended (exit code "
                                f"{worker.exitcode}) before it reported; "
                                "possible causes are a crash in the platform "
@@ -249,7 +268,7 @@ def _worker(channel: Any, prepared: Any, count: int,
     from multiprocessing.connection import wait
 
     # The calling script, run again here, may have set a SIGTERM handler;
-    # terminate() must still stop this process.
+    # from here on terminate() stops this process whatever it was.
     signal.signal(signal.SIGTERM, signal.SIG_DFL)
     parent = multiprocessing.parent_process()
 
