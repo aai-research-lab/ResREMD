@@ -37,21 +37,42 @@ def measure(prepared: Any, *, contexts_per_device: list[int] | None = None,
     state, a count that fails is recorded and the others still run, and a
     process that fails as it exits, after its row is in, is reported rather
     than taking the table with it. Like any use of multiprocessing, a script
-    that sets ``isolate`` needs an ``if __name__ == "__main__":`` guard.
-    Other settings are those of :func:`_measure`.
+    that sets ``isolate`` needs an ``if __name__ == "__main__":`` guard and
+    must be read from a file. A SIGTERM that would end this process first
+    stops the timing process; a SIGTERM handler of the caller's own is left
+    to decide. Other settings are those of :func:`_measure`.
     """
     import inspect
+    import numbers
 
     from .errors import InputError
     from .system import from_objects, load_prepared, select_atoms
 
-    counts = list(contexts_per_device or [1, 2, 4, 8])
-    if any(int(c) < 1 for c in counts):
-        raise InputError("Contexts per device are counts of at least 1.",
+    if isolate:
+        _check_isolatable()
+
+    def whole(name: str, value: Any, least: int) -> int:
+        if not isinstance(value, numbers.Integral) or isinstance(value, bool):
+            raise InputError(f"{name} takes whole numbers, not {value!r}.",
+                             code="resremd.input.type")
+        if value < least:
+            raise InputError(f"{name} takes counts of at least {least}, not "
+                             f"{value}.", code="resremd.input.range")
+        return int(value)
+
+    counts = [1, 2, 4, 8] if contexts_per_device is None \
+        else contexts_per_device
+    counts = list(counts) if hasattr(counts, "__iter__") else [counts]
+    if not counts:
+        raise InputError("contexts_per_device names no count to time.",
                          code="resremd.input.range")
-    # Settings and the solute are checked here, once, rather than failing
-    # in every process.
-    inspect.signature(_measure).bind(None, counts, **settings)
+    counts = [whole("contexts_per_device", c, 1) for c in counts]
+    # The names of the settings, their counts and the solute are checked
+    # here once rather than failing in every process.
+    bound = inspect.signature(_measure).bind(None, counts, **settings)
+    bound.apply_defaults()
+    for name, least in (("n_replicas", 2), ("steps", 1), ("cycles", 1)):
+        settings[name] = whole(name, bound.arguments[name], least)
     source = prepared
     if isinstance(prepared, (str, Path)):
         prepared = load_prepared(prepared)
@@ -62,27 +83,113 @@ def measure(prepared: Any, *, contexts_per_device: list[int] | None = None,
                      settings.get("rest2_selection", "solute"), option="rest2")
     if not isolate:
         return _measure(prepared, counts, **settings)
+    return _stoppable(source, counts, settings)
+
+
+def _check_isolatable() -> None:
+    """Refuse at once where the timing processes could not run."""
     import multiprocessing
-    import queue as queues
+    import sys
+
+    from .errors import InputError
+
+    process = multiprocessing.current_process()
+    # The flag multiprocessing itself checks: a script without a main guard
+    # is being run again, as the main module of a new process.
+    if getattr(process, "_inheriting", False):
+        raise InputError(
+            "measure(isolate=True) was called again as a timing process "
+            "started: the script calling it needs an "
+            "`if __name__ == \"__main__\":` guard.",
+            code="resremd.input.isolate")
+    if process.daemon:
+        raise InputError(
+            "measure(isolate=True) cannot start timing processes from a "
+            "daemonic process (a multiprocessing.Pool worker, say). Call it "
+            "with isolate=False there, or from a process of your own.",
+            code="resremd.input.isolate")
+    main = sys.modules.get("__main__")
+    if getattr(main, "__file__", None) == "<stdin>":
+        raise InputError(
+            "measure(isolate=True) cannot run from standard input: each "
+            "timing process imports the calling script again, so it must "
+            "be a file. Run the script as a file, or set isolate=False.",
+            code="resremd.input.isolate")
+
+
+class _Stopped(BaseException):
+    """A SIGTERM that ended the timing."""
+
+
+def _stoppable(source: Any, counts: list[int],
+               settings: dict[str, Any]) -> list[dict[str, Any]]:
+    """The timings in fresh processes, with a SIGTERM that would end this
+    process (kill, timeout, a job manager) stopping the timing process
+    first rather than leaving it to run on."""
+    import multiprocessing
+    import os
+    import signal
+    import threading
 
     spawn = multiprocessing.get_context("spawn")
+    if threading.current_thread() is not threading.main_thread() or \
+            signal.getsignal(signal.SIGTERM) is not signal.SIG_DFL:
+        # A caller's own handler decides; one that raises or exits still
+        # stops the timing process on the way out.
+        return _isolated(spawn, source, counts, settings, {})
+    state = {"starting": False, "signal": None, "raised": False}
+
+    def stop(number, _frame):
+        # A second signal, or one while a process is being started, is
+        # only noted: the cleanup it would cut short must finish.
+        state["signal"] = number
+        if not state["starting"] and not state["raised"]:
+            state["raised"] = True
+            raise _Stopped
+
+    signal.signal(signal.SIGTERM, stop)
+    try:
+        return _isolated(spawn, source, counts, settings, state)
+    except _Stopped:
+        pass
+    finally:
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    logger.warning("Stopped by SIGTERM; the timing process was stopped "
+                   "first.")
+    # The signal then does what it would have done.
+    os.kill(os.getpid(), signal.SIGTERM)
+    raise SystemExit(128 + signal.SIGTERM)
+
+
+def _isolated(spawn: Any, source: Any, counts: list[int],
+              settings: dict[str, Any],
+              state: dict[str, Any]) -> list[dict[str, Any]]:
+    import queue as queues
+
     rows = []
     for count in counts:
         channel = spawn.Queue()
         # A directory is read again by the process; a System travels as XML.
         worker = spawn.Process(target=_worker,
-                               args=(channel, source, count, settings))
-        try:
-            worker.start()
-        except Exception as exc:  # a System that cannot be sent
-            rows.append({"contexts_per_device": count,
-                         "error": f"could not start: {exc}"})
-            logger.warning("Timing %d contexts per device could not start: "
-                           "%s", count, exc)
-            continue
+                               args=(channel, source, count, settings),
+                               daemon=True)
         result = None
         hung = False
         try:
+            state["starting"] = True
+            try:
+                worker.start()
+            except Exception as exc:  # a System that cannot be sent
+                rows.append({"contexts_per_device": count,
+                             "error": f"could not start: {exc}"})
+                logger.warning("Timing %d contexts per device could not "
+                               "start: %s", count, exc)
+                continue
+            finally:
+                state["starting"] = False
+            if state.get("signal") is not None and not state["raised"]:
+                state["raised"] = True
+                raise _Stopped
             while result is None:
                 try:
                     result = channel.get(timeout=1.0)
@@ -98,13 +205,16 @@ def measure(prepared: Any, *, contexts_per_device: list[int] | None = None,
         finally:
             if worker.is_alive():
                 worker.terminate()
-                worker.join()
+                worker.join(timeout=10)
+                if worker.is_alive():
+                    worker.kill()
+                    worker.join()
         if result is None:
             result = ("error", f"the process ended (exit code "
-                               f"{worker.exitcode}) before it reported. From "
-                               "a script, measure(isolate=True) needs an "
-                               "`if __name__ == \"__main__\":` guard and a "
-                               "file to run from")
+                               f"{worker.exitcode}) before it reported; "
+                               "possible causes are a crash in the platform "
+                               "or, from a script, a missing "
+                               "`if __name__ == \"__main__\":` guard")
         status, value = result
         if status == "error":
             logger.warning("Timing %d contexts per device failed: %s", count,
@@ -132,10 +242,28 @@ def measure(prepared: Any, *, contexts_per_device: list[int] | None = None,
 
 def _worker(channel: Any, prepared: Any, count: int,
             settings: dict[str, Any]) -> None:
+    import multiprocessing
+    import os
+    import signal
+    import threading
+    from multiprocessing.connection import wait
+
+    # The calling script, run again here, may have set a SIGTERM handler;
+    # terminate() must still stop this process.
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    parent = multiprocessing.parent_process()
+
+    def orphaned() -> None:
+        wait([parent.sentinel])
+        os._exit(1)
+
+    if parent is not None:
+        # Nor may it outlive a parent that was killed outright.
+        threading.Thread(target=orphaned, daemon=True).start()
     logging.basicConfig(level=logging.WARNING)
     try:
         row = _measure(prepared, [count], **settings)[0]
-        row["pid"] = __import__("os").getpid()
+        row["pid"] = os.getpid()
         channel.put(("ok", row))
     except BaseException as exc:
         channel.put(("error", f"{type(exc).__name__}: {exc}"))

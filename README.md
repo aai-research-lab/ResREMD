@@ -342,7 +342,9 @@ is counted twice. Reservoir builds stop and resume the same way.
   of a cycle spent outside dynamics. If the total still grows at the
   largest count, the device has room for more contexts; if the overhead
   share is large, a longer `exchange_interval_steps` pays more than
-  hardware. `--rest2` times REST2 replicas.
+  hardware. `--rest2` times REST2 replicas, and `--ensemble nvt` times them
+  at the constant volume REST2 is best run at, whatever the prepared System
+  carries. Each count is timed in a fresh process.
 
 ## Validation
 

@@ -18,7 +18,7 @@ import logging
 import sys
 import textwrap
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from . import __version__
 from .errors import ResRemdError
@@ -123,12 +123,21 @@ def template(schema: Schema) -> str:
     return "\n".join(lines)
 
 
-def _positive(text: str) -> int:
-    value = int(text)
-    if value < 1:
-        raise argparse.ArgumentTypeError(f"{text} is not a count of at "
-                                         "least 1")
-    return value
+def _count(least: int) -> Callable[[str], int]:
+    def parse(text: str) -> int:
+        try:
+            value = int(text)
+        except ValueError:
+            value = least - 1
+        if value < least:
+            raise argparse.ArgumentTypeError(f"{text} is not a count of at "
+                                             f"least {least}")
+        return value
+
+    return parse
+
+
+_positive = _count(1)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -194,13 +203,13 @@ def build_parser() -> argparse.ArgumentParser:
                     "to choose `contexts_per_device` and the exchange "
                     "interval on a GPU.")
     p_thr.add_argument("--prepared", required=True, metavar="DIR")
-    p_thr.add_argument("--n-replicas", type=int, default=8)
+    p_thr.add_argument("--n-replicas", type=_count(2), default=8)
     p_thr.add_argument("--contexts-per-device", type=_positive, nargs="+",
                        default=[1, 2, 4, 8], metavar="N")
-    p_thr.add_argument("--steps", type=int, default=500,
+    p_thr.add_argument("--steps", type=_positive, default=500,
                        help="MD steps per cycle, the exchange interval "
                             "(default 500).")
-    p_thr.add_argument("--cycles", type=int, default=10)
+    p_thr.add_argument("--cycles", type=_positive, default=10)
     p_thr.add_argument("--timestep-fs", type=float, default=2.0)
     p_thr.add_argument("--platform", default="auto")
     p_thr.add_argument("--precision", default="mixed",
