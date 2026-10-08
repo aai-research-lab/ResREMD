@@ -99,8 +99,6 @@ def test_a_failing_count_is_recorded_and_the_others_reported(tmp_path,
 
 
 def test_settings_are_checked_before_any_process_starts():
-    import pytest
-
     from resremd.errors import InputError
 
     with pytest.raises(TypeError):
@@ -113,7 +111,6 @@ def test_settings_are_checked_before_any_process_starts():
 
 def test_counts_must_be_whole_numbers(capsys):
     import numpy as np
-    import pytest
 
     from resremd.errors import InputError
 
@@ -157,18 +154,18 @@ def _script(tmp_path, text, *, stdin=False):
     if stdin:
         return subprocess.run([sys.executable, "-"], input=text,
                               cwd=tmp_path, env=env, capture_output=True,
-                              text=True, timeout=300)
+                              text=True, timeout=120)
     return subprocess.run([sys.executable, str(path)], cwd=tmp_path,
                           env=env, capture_output=True, text=True,
-                          timeout=300)
+                          timeout=120)
 
 
 TIME_IT = """
 from resremd import testsystems
 from resremd.throughput import measure
 
-def time_it(steps=10, counts=(1,)):
-    rows = measure(testsystems.lj_box(), n_replicas=2,
+def time_it(steps=10, counts=(1,), n_side=5):
+    rows = measure(testsystems.lj_box(n_side=n_side), n_replicas=2,
                    contexts_per_device=list(counts), steps=steps, cycles=1,
                    platform="Reference", isolate=True)
     return [r.get("error", "ok") for r in rows]
@@ -178,10 +175,17 @@ def time_it(steps=10, counts=(1,)):
 def test_a_script_without_a_main_guard_is_told_so(tmp_path):
     """Its timing process runs the script again; there measure refuses at
     once rather than timing, and the script's own rows name the cause."""
-    done = _script(tmp_path, TIME_IT + "print('rows', time_it())\n")
+    # A System larger than a pipe holds, which the process never reads,
+    # from a script that lets a broken pipe end it.
+    done = _script(tmp_path, TIME_IT + """
+import signal
+
+signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+print('rows', time_it(n_side=10))
+""")
     assert done.returncode == 0, done.stderr
     assert done.stdout.count("rows") == 1
-    assert "called again as a timing process started" in done.stderr
+    assert "ran again inside a timing process" in done.stderr
     assert "__main__" in done.stdout.split("rows", 1)[1]
 
 
@@ -226,14 +230,21 @@ def test_a_count_that_cannot_start_is_recorded(monkeypatch):
     context = multiprocessing.get_context("spawn")
 
     def refuse(self):
-        raise RuntimeError("cannot send this System")
+        raise RuntimeError("no more processes")
 
-    monkeypatch.setattr(type(context.Process(target=print)), "start", refuse)
-    rows = measure(testsystems.lj_box(), n_replicas=2,
-                   contexts_per_device=[1, 2], steps=10, cycles=1,
-                   platform="Reference", isolate=True)
-    assert [r["error"] for r in rows] == ["could not start: cannot send "
-                                          "this System"] * 2
+    settings = dict(n_replicas=2, contexts_per_device=[1, 2], steps=10,
+                    cycles=1, platform="Reference", isolate=True)
+    with monkeypatch.context() as patch:
+        patch.setattr(context.Process, "start", refuse)
+        rows = measure(testsystems.lj_box(), **settings)
+    assert [r["error"] for r in rows] == \
+        ["could not start: no more processes"] * 2
+    # A System that cannot be sent.
+    box = testsystems.lj_box()
+    box.unsendable = lambda: None
+    rows = measure(box, **settings)
+    assert len(rows) == 2 and all("could not start" in r["error"]
+                                  for r in rows)
 
 
 def _alive(pid):
@@ -253,8 +264,34 @@ def _alive(pid):
     return True
 
 
-# The scripts below time one count for hours unless they are stopped.
-LONG = """
+def test_a_process_ended_by_a_signal_is_named(tmp_path):
+    done = _script(tmp_path, TIME_IT + """
+import os
+import signal
+import threading
+
+if __name__ == "__mp_main__":
+    threading.Timer(1.0, os.kill, (os.getpid(), signal.SIGKILL)).start()
+if __name__ == "__main__":
+    print("rows", time_it(steps=10**7))
+""")
+    assert done.returncode == 0, done.stderr
+    assert "ended by SIGKILL" in done.stdout
+
+
+# Every script says which processes it started, so that the test can see
+# that none is left.
+LAUNCHES = """
+from multiprocessing import popen_spawn_posix as _spawning
+
+def _launch(self, obj, _launch=_spawning.Popen._launch):
+    _launch(self, obj)
+    print("launched", self.pid, flush=True)
+
+_spawning.Popen._launch = _launch
+"""
+# Says when the timing process runs, for a signal sent then.
+ANNOUNCE = """
 import multiprocessing
 import threading
 import time
@@ -264,7 +301,9 @@ def announce():
         time.sleep(0.05)
     time.sleep(0.5)
     print("worker", multiprocessing.active_children()[0].pid, flush=True)
-
+"""
+# Times one count for hours unless it is stopped.
+LONG = ANNOUNCE + """
 if __name__ == "__main__":
     threading.Thread(target=announce, daemon=True).start()
     time_it(steps=10**7)
@@ -279,24 +318,26 @@ SIGNAL_ITSELF = DEFAULT + """
 import os
 from multiprocessing import popen_spawn_posix, process, util
 
-def then_signal(function, note=None):
-    def wrapped(*args):
-        result = function(*args)
-        os.kill(os.getpid(), signal.SIGTERM)
+def then_signal(function, note=None, number=signal.SIGTERM):
+    def wrapped(*args, **kwargs):
+        result = function(*args, **kwargs)
+        os.kill(os.getpid(), number)
         if note:
             print(note, flush=True)
         return result
     return wrapped
 """
-# Each way a timing script can be stopped: the script, the signal the test
-# sends once the timing process runs (None: the script signals itself),
-# the status the script ends with, and whether it says it was stopped.
+# Each way a timing script can be stopped: the script; the signal the test
+# sends once the timing process runs (none: the script signals itself);
+# the status the script ends with; whether it says it was stopped; what
+# else its output shows; how many processes it starts; and the seconds it
+# may take to end.
 STOPS = {
     # No handler: the script dies of the signal.
-    "sigterm": (DEFAULT + LONG, "SIGTERM", -15, True),
+    "sigterm": dict(script=DEFAULT + LONG, send="SIGTERM", status=-15),
     # Its own handler, which the timing process inherits as the script is
     # imported again there, decides; the timing process still stops at once.
-    "own handler": ("""
+    "own handler": dict(script="""
 import multiprocessing
 import signal
 
@@ -306,17 +347,32 @@ def leave(number, frame):
         raise SystemExit(7)
 
 signal.signal(signal.SIGTERM, leave)
-""" + LONG, "SIGTERM", 7, False),
+""" + LONG, send="SIGTERM", status=7, says=False, within=5),
     # Killed outright: the timing process sees it go.
-    "sigkill": (DEFAULT + LONG, "SIGKILL", -9, False),
+    "sigkill": dict(script=DEFAULT + LONG, send="SIGKILL", status=-9,
+                    says=False),
     # A second signal while the timing process is stopped does not cut
     # the cleanup short.
-    "again in cleanup": (SIGNAL_ITSELF + """
+    "again in cleanup": dict(script=SIGNAL_ITSELF + """
 process.BaseProcess.terminate = then_signal(process.BaseProcess.terminate,
                                             "cleanup done")
-""" + LONG, "SIGTERM", -15, True),
+""" + LONG, send="SIGTERM", status=-15, shows="cleanup done"),
+    # A SIGTERM while a Ctrl-C is being handled still ends the script.
+    "after a ctrl-c": dict(script=SIGNAL_ITSELF + """
+# A shell starts a background job with SIGINT ignored.
+signal.signal(signal.SIGINT, signal.default_int_handler)
+process.BaseProcess.terminate = then_signal(process.BaseProcess.terminate)
+""" + ANNOUNCE + """
+if __name__ == "__main__":
+    threading.Thread(target=announce, daemon=True).start()
+    try:
+        time_it(steps=10**7)
+    except KeyboardInterrupt:
+        print("still running", flush=True)
+        time.sleep(5)
+""", send="SIGINT", status=-15),
     # A signal as a timing process is being started.
-    "while starting": (SIGNAL_ITSELF + """
+    "while starting": dict(script=SIGNAL_ITSELF + """
 def launch(self, obj):
     launched(self, obj)
     print("worker", self.pid, flush=True)
@@ -327,22 +383,43 @@ popen_spawn_posix.Popen._launch = launch
 
 if __name__ == "__main__":
     time_it(steps=10**7)
-""", None, -15, True),
+""", status=-15),
+    # A signal while a large System waits for a process that imports the
+    # script slowly: the stop does not wait for the import, nor does the
+    # broken pipe end a script that lets one.
+    "during a slow import": dict(script=DEFAULT + """
+import os
+import threading
+import time
+
+signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+
+if __name__ == "__mp_main__":
+    time.sleep(60)
+if __name__ == "__main__":
+    threading.Timer(2.0, os.kill, (os.getpid(), signal.SIGTERM)).start()
+    time_it(steps=10**7, n_side=10)
+""", status=-15, within=20),
     # A signal in a finalizer, as the second count is set up: no process
     # is started after it.
-    "in a finalizer": (SIGNAL_ITSELF + """
+    "in a finalizer": dict(script=SIGNAL_ITSELF + """
 util.close_fds = then_signal(util.close_fds)
-
-def launch(self, obj):
-    print("launch", flush=True)
-    launched(self, obj)
-
-launched = popen_spawn_posix.Popen._launch
-popen_spawn_posix.Popen._launch = launch
 
 if __name__ == "__main__":
     time_it(counts=(1, 1, 1))
-""", None, -15, True),
+""", status=-15, launches=1),
+    # A signal while a process that reported is stuck on its way out.
+    "hung on exit": dict(script=SIGNAL_ITSELF + """
+import atexit
+import time
+
+if __name__ == "__mp_main__":
+    atexit.register(time.sleep, 600)
+process.BaseProcess.join = then_signal(process.BaseProcess.join)
+
+if __name__ == "__main__":
+    time_it()
+""", status=-15, within=20),
 }
 
 
@@ -354,8 +431,9 @@ def test_a_stopped_script_leaves_no_timing_process(tmp_path, how):
     import sys
     import time
 
-    text, send, expected, says = STOPS[how]
-    (tmp_path / "script.py").write_text(TIME_IT + text)
+    stop = {"send": None, "says": True, "shows": None, "launches": None,
+            "within": 60, **STOPS[how]}
+    (tmp_path / "script.py").write_text(LAUNCHES + TIME_IT + stop["script"])
     env = {**os.environ,
            "PYTHONPATH": os.pathsep.join(p for p in sys.path if p)}
     out, err = tmp_path / "out.txt", tmp_path / "err.txt"
@@ -363,40 +441,49 @@ def test_a_stopped_script_leaves_no_timing_process(tmp_path, how):
         script = subprocess.Popen([sys.executable, "script.py"],
                                   cwd=tmp_path, env=env, stdout=o, stderr=e,
                                   start_new_session=True)
-    worker = None
+
+    def launched():
+        return [int(line.split()[1]) for line in out.read_text().split("\n")
+                if line.startswith("launched ")]
+
+    started = time.monotonic()
     try:
-        deadline = time.monotonic() + 120
-        while "\n" not in out.read_text() and script.poll() is None and \
-                time.monotonic() < deadline:
-            time.sleep(0.1)
-        line = out.read_text().split("\n")[0]
-        if line.startswith("worker"):
-            worker = int(line.split()[1])
-        sent = time.monotonic()
-        if send:
-            assert worker is not None, err.read_text()
-            os.kill(script.pid, getattr(signal, send))
-        status = script.wait(timeout=60)
-        assert status == expected, err.read_text()
-        assert ("Stopped by SIGTERM." in err.read_text()) == says
-        # Nothing it started fails noisily on the way down.
-        assert "Traceback" not in err.read_text(), err.read_text()
-        if how == "own handler":
-            assert time.monotonic() - sent < 5
-        if how == "again in cleanup":
-            assert "cleanup done" in out.read_text()
-        if how == "in a finalizer":
-            assert out.read_text().count("launch") == 1
-        if worker is not None and how != "sigkill":
-            # Stopped and reaped before the script ended.
-            assert not _alive(worker), "the timing process was left running"
-        elif worker is not None:
-            while _alive(worker) and time.monotonic() < sent + 30:
+        if stop["send"]:
+            while "worker" not in out.read_text() and \
+                    script.poll() is None and \
+                    time.monotonic() < started + 120:
                 time.sleep(0.1)
-            assert not _alive(worker), "the timing process was left running"
+            assert "worker" in out.read_text(), err.read_text()
+            started = time.monotonic()
+            os.kill(script.pid, getattr(signal, stop["send"]))
+        status = script.wait(timeout=120)
+        assert time.monotonic() - started < stop["within"]
+        assert status == stop["status"], err.read_text()
+        said = err.read_text()
+        assert ("Stopped by SIGTERM." in said) == stop["says"]
+        # Nothing it started fails noisily on the way down, and nothing is
+        # left for the resource tracker to clean up after it.
+        assert "Traceback" not in said, said
+        assert "leaked" not in said, said
+        if stop["shows"]:
+            assert stop["shows"] in out.read_text()
+        assert launched()
+        if stop["launches"]:
+            assert len(launched()) == stop["launches"]
+        if how != "sigkill":
+            # Stopped and reaped before the script ended.
+            assert not any(_alive(pid) for pid in launched()), \
+                "a timing process was left running"
+        else:
+            while any(_alive(pid) for pid in launched()) and \
+                    time.monotonic() < started + 30:
+                time.sleep(0.1)
+            assert not any(_alive(pid) for pid in launched()), \
+                "a timing process was left running"
     finally:
         if script.poll() is None:
             os.killpg(script.pid, signal.SIGKILL)
             script.wait()
-        if worker is not None and _alive(worker):
-            os.kill(worker, signal.SIGKILL)
+        for pid in launched():
+            if _alive(pid):
+                os.kill(pid, signal.SIGKILL)

@@ -36,12 +36,13 @@ def measure(prepared: Any, *, contexts_per_device: list[int] | None = None,
     each count is timed in a fresh process: none inherits another's device
     state, a count that fails is recorded and the others still run, and a
     process that fails as it exits, after its row is in, is reported rather
-    than taking the table with it. Like any use of multiprocessing, a script
-    that sets ``isolate`` needs an ``if __name__ == "__main__":`` guard and
-    cannot be read from standard input. A SIGTERM that would end this
-    process first stops the timing process; a SIGTERM handler of the
-    caller's own is left to decide. Other settings are those of
-    :func:`_measure`.
+    than taking the table with it. As each process is spawned, and imports
+    the calling script again, a script that sets ``isolate`` needs an
+    ``if __name__ == "__main__":`` guard and cannot be read from standard
+    input. Called from the main thread, a SIGTERM that would end this
+    process first stops the timing process (from another thread, the timing
+    process ends soon after this one); a SIGTERM handler of the caller's own
+    is left to decide. Other settings are those of :func:`_measure`.
     """
     import inspect
     import numbers
@@ -102,7 +103,7 @@ def _check_isolatable() -> None:
     # is being run again, as the main module of a new process.
     if getattr(process, "_inheriting", False):
         raise InputError(
-            "measure(isolate=True) was called again as a timing process "
+            "measure(isolate=True) ran again inside a timing process as it "
             "started: the script calling it needs an "
             "`if __name__ == \"__main__\":` guard.",
             code="resremd.input.isolate")
@@ -145,71 +146,109 @@ def _stoppable(source: Any, counts: list[int],
     state = {"signal": None}
 
     def stop(number, _frame):
-        # Only noted, and acted on where the timing loop looks (at least
-        # once a second): raised here it could land anywhere, in a process
-        # being started or a finalizer that would swallow it.
+        # Only noted, and acted on where the timing loop looks (four times
+        # a second): raised here it could land anywhere, in a process being
+        # started or a finalizer that would swallow it.
         state["signal"] = number
 
-    rows = None
     try:
         signal.signal(signal.SIGTERM, stop)
-        rows = _isolated(spawn, source, counts, settings, state)
+        return _isolated(spawn, source, counts, settings, state)
     except _Stopped:
         pass
     finally:
         signal.signal(signal.SIGTERM, signal.SIG_DFL)
-    if state["signal"] is None:
-        return rows
-    logger.warning("Stopped by SIGTERM.")
-    # The signal then does what it would have done.
-    os.kill(os.getpid(), signal.SIGTERM)
+        if state["signal"] is not None:
+            logger.warning("Stopped by SIGTERM.")
+            # The signal then does what it would have done, whatever else
+            # (a Ctrl-C, say) was under way.
+            os.kill(os.getpid(), signal.SIGTERM)
+    # Reached only if that did not end the process (SIGTERM blocked).
     raise SystemExit(128 + signal.SIGTERM)
 
 
 def _isolated(spawn: Any, source: Any, counts: list[int],
               settings: dict[str, Any],
               state: dict[str, Any]) -> list[dict[str, Any]]:
-    import queue as queues
+    import pickle
     import signal
+    import threading
+
+    poll = 0.25  # seconds between looks at a noted signal
 
     def check() -> None:
         if state.get("signal") is not None:
             raise _Stopped
 
-    rows = []
+    def failed(count: int, exc: Exception) -> None:
+        rows.append({"contexts_per_device": count,
+                     "error": f"could not start: {exc}"})
+        logger.warning("Timing %d contexts per device could not start: %s",
+                       count, exc)
+
+    rows: list[dict[str, Any]] = []
+    try:
+        # A directory is read again by each process; a System travels as
+        # XML, sent once the process runs, so that starting it does not
+        # wait for the process to import the calling script.
+        data = pickle.dumps(source)
+    except Exception as exc:  # a System that cannot be sent
+        for count in counts:
+            failed(count, exc)
+        return rows
+
+    def send(sender: Any) -> None:
+        # From a thread, as a large System fills the pipe until the process
+        # reads it; a process that ended first leaves a broken pipe, which
+        # with SIGPIPE held back here is an error rather than a signal that
+        # could end the caller.
+        if hasattr(signal, "pthread_sigmask"):
+            signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGPIPE})
+        try:
+            sender.send_bytes(data)
+        except OSError:
+            pass
+        finally:
+            sender.close()
+
     for count in counts:
         check()
-        channel = spawn.Queue()
-        # A directory is read again by the process; a System travels as XML.
+        results, reporter = spawn.Pipe(duplex=False)
+        inbox, sender = spawn.Pipe(duplex=False)
         worker = spawn.Process(target=_worker,
-                               args=(channel, source, count, settings),
+                               args=(reporter, inbox, count, settings),
                                daemon=True)
         result = None
         hung = False
+        sending = False
         try:
+            # Again: setting up this count let the last one's finalizers
+            # run, and a signal may have come during one.
             check()
             try:
                 worker.start()
-            except Exception as exc:  # a System that cannot be sent
-                rows.append({"contexts_per_device": count,
-                             "error": f"could not start: {exc}"})
-                logger.warning("Timing %d contexts per device could not "
-                               "start: %s", count, exc)
+            except Exception as exc:
+                failed(count, exc)
                 continue
+            finally:
+                # The process has its own ends now; with these closed, its
+                # end shows here as the end of the pipe.
+                inbox.close()
+                reporter.close()
+            threading.Thread(target=send, args=(sender,), daemon=True).start()
+            sending = True
             while result is None:
                 check()
-                try:
-                    result = channel.get(timeout=1.0)
-                except queues.Empty:
-                    if not worker.is_alive():
-                        try:
-                            result = channel.get(timeout=1.0)
-                        except queues.Empty:
-                            break
-            # A process stuck in teardown after reporting is not waited on.
-            for _ in range(120):
+                if results.poll(poll):
+                    try:
+                        result = results.recv()
+                    except EOFError:  # ended without reporting
+                        break
+            # A process stuck in teardown after reporting is waited on for
+            # two minutes at most, then stopped.
+            for _ in range(int(120 / poll)):
                 check()
-                worker.join(timeout=1.0)
+                worker.join(timeout=poll)
                 if not worker.is_alive():
                     break
             hung = worker.is_alive()
@@ -220,6 +259,9 @@ def _isolated(spawn: Any, source: Any, counts: list[int],
                 if worker.is_alive():
                     worker.kill()
                     worker.join()
+            results.close()
+            if not sending:
+                sender.close()
         if result is None and (worker.exitcode or 0) < 0:
             try:
                 name = signal.Signals(-worker.exitcode).name
@@ -259,10 +301,11 @@ def _isolated(spawn: Any, source: Any, counts: list[int],
     return rows
 
 
-def _worker(channel: Any, prepared: Any, count: int,
+def _worker(channel: Any, inbox: Any, count: int,
             settings: dict[str, Any]) -> None:
     import multiprocessing
     import os
+    import pickle
     import signal
     import threading
     from multiprocessing.connection import wait
@@ -277,15 +320,18 @@ def _worker(channel: Any, prepared: Any, count: int,
         os._exit(1)
 
     if parent is not None:
-        # Nor may it outlive a parent that was killed outright.
+        # Nor may it outlive a parent that was killed outright (from here
+        # on: while it still imports the calling script, it cannot tell).
         threading.Thread(target=orphaned, daemon=True).start()
     logging.basicConfig(level=logging.WARNING)
     try:
+        prepared = pickle.loads(inbox.recv_bytes())
+        inbox.close()
         row = _measure(prepared, [count], **settings)[0]
         row["pid"] = os.getpid()
-        channel.put(("ok", row))
+        channel.send(("ok", row))
     except BaseException as exc:
-        channel.put(("error", f"{type(exc).__name__}: {exc}"))
+        channel.send(("error", f"{type(exc).__name__}: {exc}"))
 
 
 def _measure(prepared: Any, counts: list[int], *, n_replicas: int = 8,
