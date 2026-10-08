@@ -601,3 +601,27 @@ def test_a_stop_between_two_checks_still_leaves_a_checkpoint(tmp_path,
     meta = resremd.generate_reservoir(testsystems.double_well(), resume=True,
                                       **common)
     assert meta["complete"]
+
+
+def test_a_build_is_not_resumed_in_another_ensemble(tmp_path):
+    from resremd.errors import ResumeError
+
+    def stop(info):
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    box = testsystems.lj_box(n_side=3)
+    common = dict(output=str(tmp_path / "r"), temperature_K=100.0,
+                  duration_ns=0.6, frame_interval_steps=500, timestep_fs=8.0,
+                  equilibration_ns=0.0, platform="Reference", random_seed=2,
+                  minimize=False)
+    meta = resremd.generate_reservoir(box, on_progress=stop, **common)
+    assert not meta["complete"]
+    with pytest.raises(ResumeError, match="another ensemble"):
+        resremd.generate_reservoir(box, resume=True, ensemble="npt",
+                                   **common)
+    other = testsystems.lj_box(n_side=3)
+    other.system.getForce(0).setCutoffDistance(0.65)
+    with pytest.raises(ResumeError, match="another System"):
+        resremd.generate_reservoir(other, resume=True, **common)
+    meta = resremd.generate_reservoir(box, resume=True, **common)
+    assert meta["complete"]

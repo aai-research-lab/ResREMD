@@ -112,6 +112,14 @@ def generate(prepared: Prepared | str | Path | None = None, *,
             raise ResumeError(f"There is no unfinished build in {out}.",
                               code="resremd.resume.missing")
         meta = json.loads(meta_file.read_text())
+        if meta.get("ensemble") != ensemble.as_dict() or \
+                meta["source"].get("system_sha256") != \
+                system_digest(prep.system):
+            raise ResumeError(
+                "The build in progress was started from another System or "
+                "in another ensemble (constant volume or pressure, and the "
+                "barostat's settings). Resume with the same ones, or start "
+                "again in a new directory.", code="resremd.resume.mismatch")
         saved_rest2 = meta.get("rest2")
         if rest2_meta is not None and saved_rest2 is not None and \
                 saved_rest2.get("dispersion_correction") != \
