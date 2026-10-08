@@ -99,5 +99,5 @@ def test_settings_are_checked_before_any_process_starts():
         measure(testsystems.lj_box(), n_replica=2, isolate=True)
     with pytest.raises(InputError, match="at least 1"):
         measure(testsystems.lj_box(), contexts_per_device=[0], isolate=True)
-    with pytest.raises(InputError, match="leaves no atoms"):
+    with pytest.raises(InputError, match="rest2_selection: solute"):
         measure(testsystems.lj_box(), rest2=True, isolate=True)

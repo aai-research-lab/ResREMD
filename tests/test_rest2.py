@@ -379,3 +379,11 @@ def test_a_changed_ensemble_is_reported_as_one(tmp_path):
                     resume=True, ensemble="nvt", **common)
     assert "ensemble" in str(error.value)
     assert "earlier ResREMD" not in str(error.value)
+
+
+def test_an_empty_solute_names_the_rest2_selection(tmp_path):
+    with pytest.raises(InputError, match="rest2_selection: solute"):
+        resremd.run(testsystems.lj_box(), output=str(tmp_path / "run"),
+                    rest2=True, temperatures_K=[100.0, 150.0],
+                    production_steps=100, exchange_interval_steps=50,
+                    platform="Reference", equilibration_ns=0.0)

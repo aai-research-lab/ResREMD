@@ -59,7 +59,7 @@ def measure(prepared: Any, *, contexts_per_device: list[int] | None = None,
         prepared = source = from_objects(*prepared)
     if settings.get("rest2"):
         select_atoms(prepared.topology,
-                     settings.get("rest2_selection", "solute"))
+                     settings.get("rest2_selection", "solute"), option="rest2")
     if not isolate:
         return _measure(prepared, counts, **settings)
     import multiprocessing
@@ -164,7 +164,8 @@ def _measure(prepared: Any, counts: list[int], *, n_replicas: int = 8,
     if rest2:
         from .rest2 import rest2_system, scale_of
 
-        solute = select_atoms(prepared.topology, rest2_selection)
+        solute = select_atoms(prepared.topology, rest2_selection,
+                              option="rest2")
         _, known = simulated_system(system, ensemble=ensemble,
                                     pressure_bar=None,
                                     temperature_K=temperature_K,

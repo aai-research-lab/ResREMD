@@ -267,18 +267,21 @@ def warn_if_no_gpu(platform_asked: str, platform_used: str) -> None:
 
 
 def select_atoms(topology: Any, selection: str,
-                 atoms: list[int] | None = None) -> np.ndarray:
-    """Indices of the atoms to save."""
+                 atoms: list[int] | None = None, *,
+                 option: str = "save") -> np.ndarray:
+    """Indices of the selected atoms: to save, or with ``option="rest2"``
+    REST2's solute. ``option`` names the settings in messages
+    (`<option>_selection`, `<option>_atoms`)."""
     n = topology.getNumAtoms()
     if atoms is not None:
         try:
             idx = np.array(sorted({int(a) for a in atoms}), dtype=int)
         except (TypeError, ValueError):
-            raise InputError("`save_atoms` must be atom indices.",
+            raise InputError(f"`{option}_atoms` must be atom indices.",
                              code="resremd.input.type")
         if idx.size == 0 or idx[0] < 0 or idx[-1] >= n:
             raise InputError(
-                f"`save_atoms` must be indices between 0 and {n - 1}.",
+                f"`{option}_atoms` must be indices between 0 and {n - 1}.",
                 code="resremd.input.range")
         return idx
     if selection == "all":
@@ -293,7 +296,8 @@ def select_atoms(topology: Any, selection: str,
         keep.extend(a.index for a in atom_list)
     if not keep:
         raise InputError(
-            f"`save_selection: {selection}` leaves no atoms to save.",
+            f"`{option}_selection: {selection}` leaves no atoms"
+            + (" to save." if option == "save" else "."),
             code="resremd.input.selection")
     return np.array(sorted(keep), dtype=int)
 

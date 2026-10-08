@@ -230,7 +230,8 @@ class _Run:
             from .rest2 import rest2_system, scale_of, solute_digest
 
             solute = select_atoms(self.prepared.topology,
-                                  o["rest2_selection"], o["rest2_atoms"])
+                                  o["rest2_selection"], o["rest2_atoms"],
+                                  option="rest2")
             _, ensemble = simulated_system(
                 system, ensemble=o["ensemble"], pressure_bar=o["pressure_bar"],
                 temperature_K=self.temperatures[0],

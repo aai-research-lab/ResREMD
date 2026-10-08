@@ -76,7 +76,7 @@ def generate(prepared: Prepared | str | Path | None = None, *,
 
         t_sim = float(o["rest2_run_temperature_K"])
         solute = select_atoms(prep.topology, o["rest2_selection"],
-                              o["rest2_atoms"])
+                              o["rest2_atoms"], option="rest2")
         _, ens = simulated_system(
             prep.system, ensemble=o["ensemble"],
             pressure_bar=o["pressure_bar"], temperature_K=t_sim,
