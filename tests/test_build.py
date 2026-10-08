@@ -604,7 +604,10 @@ def test_a_stop_between_two_checks_still_leaves_a_checkpoint(tmp_path,
 
 
 def test_a_build_is_not_resumed_in_another_ensemble(tmp_path):
+    import json
+
     from resremd.errors import ResumeError
+    from resremd.thermo import simulated_system
 
     def stop(info):
         os.kill(os.getpid(), signal.SIGTERM)
@@ -616,12 +619,57 @@ def test_a_build_is_not_resumed_in_another_ensemble(tmp_path):
                   minimize=False)
     meta = resremd.generate_reservoir(box, on_progress=stop, **common)
     assert not meta["complete"]
-    with pytest.raises(ResumeError, match="another ensemble"):
+    with pytest.raises(ResumeError, match="started at constant volume, and "
+                       "would now go on at constant pressure"):
         resremd.generate_reservoir(box, resume=True, ensemble="npt",
                                    **common)
     other = testsystems.lj_box(n_side=3)
     other.system.getForce(0).setCutoffDistance(0.65)
-    with pytest.raises(ResumeError, match="another System"):
+    with pytest.raises(ResumeError, match="from another System"):
         resremd.generate_reservoir(other, resume=True, **common)
+    # A record that cannot be read, and a difference too small to describe.
+    path = tmp_path / "r/reservoir.json"
+    kept = path.read_text()
+    saved = json.loads(kept)
+    for value in (None, "npt", {"pressure_bar": "1"}):
+        path.write_text(json.dumps({**saved, "ensemble": value}))
+        with pytest.raises(ResumeError, match="no readable record"):
+            resremd.generate_reservoir(box, resume=True, **common)
+    _, npt = simulated_system(box.system, ensemble="npt", pressure_bar=None,
+                              temperature_K=100.0, frequency=25)
+    path.write_text(json.dumps({**saved, "ensemble": {
+        **npt.as_dict(), "pressure_bar": npt.pressure_bar * (1 + 1e-9)}}))
+    with pytest.raises(ResumeError, match="started at pressure_bar "):
+        resremd.generate_reservoir(box, resume=True, ensemble="npt",
+                                   **common)
+    path.write_text(kept)
     meta = resremd.generate_reservoir(box, resume=True, **common)
     assert meta["complete"]
+
+
+def test_a_rest2_build_at_constant_pressure_on_a_gpu_is_warned_of(
+        tmp_path, monkeypatch, caplog):
+    from resremd import build
+
+    real = build.create_context
+
+    def on_a_gpu(*args, **kwargs):
+        context, _ = real(*args, **kwargs)
+        return context, "CUDA"
+
+    monkeypatch.setattr(build, "create_context", on_a_gpu)
+    common = dict(temperature_K=200.0, rest2_run_temperature_K=100.0,
+                  rest2_atoms=list(range(5)), duration_ns=0.004,
+                  frame_interval_steps=100, timestep_fs=4.0,
+                  equilibration_ns=0.0, platform="Reference", random_seed=2,
+                  minimize=False)
+    with caplog.at_level("WARNING", logger="resremd"):
+        resremd.generate_reservoir(testsystems.lj_box(n_side=3),
+                                   output=str(tmp_path / "v"), **common)
+    assert "CustomVolumeForce" not in caplog.text
+    with caplog.at_level("WARNING", logger="resremd"):
+        meta = resremd.generate_reservoir(testsystems.lj_box(n_side=3),
+                                          output=str(tmp_path / "p"),
+                                          ensemble="npt", **common)
+    assert meta["rest2"]["dispersion_correction"] == "scaled"
+    assert "CustomVolumeForce" in caplog.text

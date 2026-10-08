@@ -112,14 +112,36 @@ def generate(prepared: Prepared | str | Path | None = None, *,
             raise ResumeError(f"There is no unfinished build in {out}.",
                               code="resremd.resume.missing")
         meta = json.loads(meta_file.read_text())
-        if meta.get("ensemble") != ensemble.as_dict() or \
-                meta["source"].get("system_sha256") != \
-                system_digest(prep.system):
+        saved = meta.get("ensemble")
+        try:
+            before = Ensemble.from_dict(saved)
+            was = before.describe()
+        except (AttributeError, TypeError, ValueError):
+            before = None
+        if not saved or before is None:
             raise ResumeError(
-                "The build in progress was started from another System or "
-                "in another ensemble (constant volume or pressure, and the "
-                "barostat's settings). Resume with the same ones, or start "
+                f"The build in progress has no readable record of its "
+                f"ensemble ({saved!r}), so going on at {ensemble.describe()} "
+                "might mix two. Start again in a new directory.",
+                code="resremd.resume.mismatch")
+        if before.as_dict() != ensemble.as_dict():
+            now = ensemble.describe()
+            if was == now:  # settings past the precision shown
+                old, new = before.as_dict(), ensemble.as_dict()
+                was, now = (", ".join(f"{k} {d[k]!r}" for k in old
+                                      if old[k] != new[k])
+                            for d in (old, new))
+            raise ResumeError(
+                f"The build in progress was started at {was}, and would now "
+                f"go on at {now}. Resume in the same ensemble, or start "
                 "again in a new directory.", code="resremd.resume.mismatch")
+        if meta["source"].get("system_sha256") != system_digest(prep.system):
+            raise ResumeError(
+                "The build in progress was started from another System (its "
+                "digest differs, for example by another force field, cutoff, "
+                "solvent or constraint). Resume with the same prepared "
+                "system, or start again in a new directory.",
+                code="resremd.resume.mismatch")
         saved_rest2 = meta.get("rest2")
         if rest2_meta is not None and saved_rest2 is not None and \
                 saved_rest2.get("dispersion_correction") != \
@@ -225,6 +247,14 @@ def generate(prepared: Prepared | str | Path | None = None, *,
         cpu_threads=o["cpu_threads"])
     meta["source"]["platform"] = platform
     warn_if_no_gpu(o["platform"], platform)
+    if rest2_meta is not None and \
+            rest2_meta["dispersion_correction"] == "scaled" and \
+            platform in ("CUDA", "HIP", "OpenCL"):
+        logger.warning(
+            "At constant pressure REST2 scales the dispersion correction "
+            "through a CustomVolumeForce, which OpenMM evaluates on the host: "
+            "every step then waits on a round trip to the GPU. Equilibrating "
+            "at constant pressure and building at constant volume avoids it.")
     if ensemble.temperature_parameter:
         # A barostat that came with the System was made for some other
         # temperature. Left there, it would accept volume moves as if at that
