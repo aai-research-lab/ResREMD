@@ -133,13 +133,14 @@ def test_counts_must_be_whole_numbers(capsys):
                    contexts_per_device=np.int64(1), steps=10, cycles=1,
                    platform="Reference")
     json.dumps(rows)
-    for option, value, least in (("--contexts-per-device", "x", 1),
-                                 ("--n-replicas", "1", 2),
-                                 ("--steps", "-5", 1), ("--cycles", "0", 1)):
+    for option, value, said in (
+            ("--contexts-per-device", "x", "x is not a whole number"),
+            ("--n-replicas", "1", "1 is not a count of at least 2"),
+            ("--steps", "-5", "-5 is not a count of at least 1"),
+            ("--cycles", "0", "0 is not a count of at least 1")):
         with pytest.raises(SystemExit):
             main(["throughput", "--prepared", "x", option, value])
-        assert f"{value} is not a count of at least {least}" in \
-            capsys.readouterr().err
+        assert said in capsys.readouterr().err
 
 
 def _script(tmp_path, text, *, stdin=False):

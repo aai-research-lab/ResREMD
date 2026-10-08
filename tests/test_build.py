@@ -631,9 +631,10 @@ def test_a_build_is_not_resumed_in_another_ensemble(tmp_path):
     path = tmp_path / "r/reservoir.json"
     kept = path.read_text()
     saved = json.loads(kept)
-    for value in (None, "npt", {"pressure_bar": "1"}):
+    for value in (None, "npt", {"pressure_bar": "1"},
+                  {**saved["ensemble"], "from_a_later_version": 1}):
         path.write_text(json.dumps({**saved, "ensemble": value}))
-        with pytest.raises(ResumeError, match="no readable record"):
+        with pytest.raises(ResumeError, match="no record of its ensemble"):
             resremd.generate_reservoir(box, resume=True, **common)
     _, npt = simulated_system(box.system, ensemble="npt", pressure_bar=None,
                               temperature_K=100.0, frequency=25)
@@ -677,3 +678,13 @@ def test_a_rest2_build_at_constant_pressure_on_a_gpu_is_warned_of(
                                           ensemble="npt", **common)
     assert meta["rest2"]["dispersion_correction"] == "scaled"
     assert "CustomVolumeForce" in caplog.text
+
+
+def test_only_an_interrupt_is_told_that_another_stops_at_once(caplog):
+    from resremd.stopping import StopRequests
+
+    for number, told in ((signal.SIGTERM, False), (signal.SIGINT, True)):
+        caplog.clear()
+        with caplog.at_level("WARNING", logger="resremd"):
+            StopRequests()._note(number, None)
+        assert ("Ctrl-C again" in caplog.text) == told

@@ -128,7 +128,8 @@ def _count(least: int) -> Callable[[str], int]:
         try:
             value = int(text)
         except ValueError:
-            value = least - 1
+            raise argparse.ArgumentTypeError(
+                f"{text} is not a whole number") from None
         if value < least:
             raise argparse.ArgumentTypeError(f"{text} is not a count of at "
                                              f"least {least}")

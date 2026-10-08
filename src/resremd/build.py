@@ -118,12 +118,15 @@ def generate(prepared: Prepared | str | Path | None = None, *,
             was = before.describe()
         except (AttributeError, TypeError, ValueError):
             before = None
-        if not saved or before is None:
+        # A record with keys other than those this version writes is not
+        # read as if it said what this version would assume.
+        if before is None or not isinstance(saved, dict) or \
+                set(saved) != set(ensemble.as_dict()):
             raise ResumeError(
-                f"The build in progress has no readable record of its "
-                f"ensemble ({saved!r}), so going on at {ensemble.describe()} "
-                "might mix two. Start again in a new directory.",
-                code="resremd.resume.mismatch")
+                f"The build in progress has no record of its ensemble that "
+                f"this version can read ({saved!r}), so going on at "
+                f"{ensemble.describe()} might mix two ensembles. Start again "
+                "in a new directory.", code="resremd.resume.mismatch")
         if before.as_dict() != ensemble.as_dict():
             now = ensemble.describe()
             if was == now:  # settings the description does not show

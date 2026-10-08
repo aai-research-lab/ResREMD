@@ -36,7 +36,9 @@ class StopRequests:
             raise KeyboardInterrupt
         if not self.requested:
             logger.warning("Signal %d: stopping at the next safe point, with "
-                           "a checkpoint. Ctrl-C again stops at once.", number)
+                           "a checkpoint.%s", number,
+                           " Ctrl-C again stops at once."
+                           if number == signal.SIGINT else "")
         self.requested = True
 
     def __exit__(self, *_exc: Any) -> bool:

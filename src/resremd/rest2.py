@@ -84,17 +84,18 @@ def solute_digest(atoms: np.ndarray) -> str:
 def gpu_round_trip_warning(platform: str, then: str) -> str | None:
     """The warning for a dispersion correction scaled at constant pressure
     on a GPU, or None where it costs nothing. OpenMM releases 8.3 to 8.6
-    evaluate a CustomVolumeForce as a CustomCPPForce, on the host; OpenMM's
-    development branch no longer does since 2026-09-28, but its builds
-    report 8.6 too and are warned all the same."""
+    evaluate a CustomVolumeForce as a CustomCPPForce, on the host. OpenMM's
+    development branch no longer does, since 2026-09-28 (openmm/openmm
+    #5440), but its builds report 8.6 too and are warned all the same."""
+    import re
+
     import openmm
 
     if platform not in ("CUDA", "HIP", "OpenCL"):
         return None
-    try:
-        version = tuple(int(v) for v in openmm.__version__.split(".")[:2])
-    except ValueError:
-        version = (8, 6)
+    number = re.match(r"(\d+)\.(\d+)", openmm.__version__)
+    version = (8, 6) if number is None else \
+        (int(number.group(1)), int(number.group(2)))
     if version > (8, 6):
         return None
     return ("At constant pressure REST2 scales the dispersion correction "

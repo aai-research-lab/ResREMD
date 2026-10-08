@@ -397,8 +397,30 @@ def test_the_gpu_warning_follows_the_openmm_version(monkeypatch):
     # Releases give "8.6.1", "8.6" and so on, and development builds the
     # number of the release they follow.
     for version, warned in (("8.5", True), ("8.6", True), ("8.6.1", True),
-                            ("8.7", False), ("8.10.0", False)):
+                            ("8.7", False), ("8.10.0", False),
+                            ("9.0rc1", False), ("unknown", True)):
         monkeypatch.setattr(openmm, "__version__", version)
         assert gpu_round_trip_warning("CPU", "building") is None
         text = gpu_round_trip_warning("CUDA", "building")
         assert (text is not None) == warned, version
+
+
+def test_a_rest2_run_passes_its_platform_to_the_gpu_warning(tmp_path,
+                                                            monkeypatch):
+    from resremd import rest2
+
+    asked = []
+
+    def warning(platform, then):
+        asked.append((platform, then))
+        return "a test warning"
+
+    monkeypatch.setattr(rest2, "gpu_round_trip_warning", warning)
+    m = resremd.run(testsystems.lj_box(pressure=True),
+                    output=str(tmp_path / "run"), production_steps=100,
+                    rest2=True, rest2_atoms=list(range(20)),
+                    temperatures_K=[100.0, 150.0], exchange_interval_steps=50,
+                    timestep_fs=4.0, platform="Reference", random_seed=1,
+                    equilibration_ns=0.0, save_selection="all")
+    assert asked == [("Reference", "running REST2")]
+    assert "a test warning" in m["warnings"]
