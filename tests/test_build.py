@@ -559,3 +559,45 @@ def test_a_rest2_build_from_before_the_constant_volume_change_is_refused(
     path.write_text(json.dumps(saved))
     with pytest.raises(ResumeError, match="'scaled'"):
         resremd.generate_reservoir(box, resume=True, **common)
+
+
+def test_a_stop_between_two_checks_still_leaves_a_checkpoint(tmp_path,
+                                                              monkeypatch):
+    """A stop request that arrives just after a frame is written must not
+    end the build without the checkpoint a resume needs."""
+    from resremd import build
+    from resremd.reservoir import ReservoirWriter
+    from resremd.stopping import StopRequests
+
+    reads = {"armed": False, "count": 0}
+
+    class Writer(ReservoirWriter):
+        def write(self, *args, **kwargs):
+            super().write(*args, **kwargs)
+            reads["armed"] = True
+
+    class Stop(StopRequests):
+        # After the first frame: no stop at the next read, then a stop.
+        @property
+        def requested(self):
+            if not reads["armed"]:
+                return False
+            reads["count"] += 1
+            return reads["count"] > 1
+
+        @requested.setter
+        def requested(self, value):
+            pass
+
+    monkeypatch.setattr(build, "ReservoirWriter", Writer)
+    monkeypatch.setattr(build, "StopRequests", Stop)
+    common = dict(output=str(tmp_path / "r"), temperature_K=520.0,
+                  duration_ns=0.02, frame_interval_steps=100,
+                  equilibration_ns=0.0, platform="Reference", random_seed=2,
+                  minimize=False)
+    meta = resremd.generate_reservoir(testsystems.double_well(), **common)
+    assert not meta["complete"]
+    monkeypatch.undo()
+    meta = resremd.generate_reservoir(testsystems.double_well(), resume=True,
+                                      **common)
+    assert meta["complete"]

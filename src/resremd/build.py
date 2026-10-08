@@ -311,7 +311,10 @@ def generate(prepared: Prepared | str | Path | None = None, *,
             done = k + 1
             converged = False
             scheduled = done % per_checkpoint == 0 or done == n_frames
-            if scheduled or stop.requested:
+            # Read once: a signal between two reads would stop the build
+            # without the checkpoint that makes it resumable.
+            stopping = stop.requested
+            if scheduled or stopping:
                 writer.flush()
                 potential.flush()
                 if bias_energy is not None:
@@ -351,7 +354,7 @@ def generate(prepared: Prepared | str | Path | None = None, *,
                 logger.info("Converged by the watched torsions at frame %d "
                             "of at most %d.", done, n_frames)
                 break
-            if stop.requested and done < n_frames:
+            if stopping and done < n_frames:
                 status = "stopped"
                 break
     if status != "complete":
