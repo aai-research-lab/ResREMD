@@ -122,6 +122,11 @@ def _check_isolatable() -> None:
             code="resremd.input.isolate")
 
 
+# Seconds a process that has reported may take to exit before it is
+# stopped and reported as hung.
+HUNG_AFTER_S = 120.0
+
+
 class _Stopped(BaseException):
     """A SIGTERM that ended the timing."""
 
@@ -141,7 +146,8 @@ def _stoppable(source: Any, counts: list[int],
             signal.getsignal(signal.SIGTERM) is not signal.SIG_DFL:
         # Handlers can be set only from the main thread, and a caller's own
         # handler decides: one that raises or exits still stops the timing
-        # process on the way out.
+        # process on the way out (within 10 s, should the handler reach a
+        # process still importing the calling script).
         return _isolated(spawn, source, counts, settings, {})
     state = {"signal": None}
 
@@ -171,137 +177,143 @@ def _isolated(spawn: Any, source: Any, counts: list[int],
               settings: dict[str, Any],
               state: dict[str, Any]) -> list[dict[str, Any]]:
     import pickle
-    import signal
-    import threading
-
-    poll = 0.25  # seconds between looks at a noted signal
+    import tempfile
 
     def check() -> None:
         if state.get("signal") is not None:
             raise _Stopped
 
-    def failed(count: int, exc: Exception) -> None:
-        rows.append({"contexts_per_device": count,
-                     "error": f"could not start: {exc}"})
-        logger.warning("Timing %d contexts per device could not start: %s",
-                       count, exc)
+    # Each process reads what it times (a directory to read again, or a
+    # System pickled as XML) from a temporary file that has no name, so
+    # that nothing is left behind however this process ends. Sent through
+    # a pipe instead, a large System would wait on the process importing
+    # the calling script.
+    with tempfile.TemporaryFile() as handoff:
+        try:
+            pickle.dump(source, handoff)
+            handoff.flush()
+        except pickle.PicklingError as exc:
+            return [_not_started(count, exc) for count in counts]
+        except OSError as exc:
+            return [_not_started(count, OSError(
+                f"the System could not be written to a temporary file "
+                f"(the directory is set by TMPDIR): {exc}"))
+                for count in counts]
+        except Exception as exc:  # a System that cannot be sent
+            return [_not_started(count, exc) for count in counts]
+        return [_one(spawn, _Handoff(handoff.fileno()), count, settings,
+                     check) for count in counts]
 
-    rows: list[dict[str, Any]] = []
+
+class _Handoff:
+    """The temporary file, as its descriptor passed to a process."""
+
+    def __init__(self, descriptor: int) -> None:
+        self.descriptor = descriptor
+
+    def __reduce__(self) -> tuple:
+        from multiprocessing.reduction import DupFd
+
+        return (_handed_over, (DupFd(self.descriptor),))
+
+
+def _handed_over(duplicate: Any) -> Any:
+    import os
+
+    return os.fdopen(duplicate.detach(), "rb")
+
+
+def _not_started(count: int, exc: Exception) -> dict[str, Any]:
+    logger.warning("Timing %d contexts per device could not start: %s",
+                   count, exc)
+    return {"contexts_per_device": count, "error": f"could not start: {exc}"}
+
+
+def _one(spawn: Any, handoff: Any, count: int, settings: dict[str, Any],
+         check: Any) -> dict[str, Any]:
+    """One count's row, from a process of its own."""
+    import signal
+
+    poll = 0.25  # seconds between looks at a noted signal
+    results, reporter = spawn.Pipe(duplex=False)
+    worker = spawn.Process(target=_worker,
+                           args=(reporter, handoff, count, settings),
+                           daemon=True)
+    result = None
+    hung = False
     try:
-        # A directory is read again by each process; a System travels as
-        # XML, sent once the process runs, so that starting it does not
-        # wait for the process to import the calling script.
-        data = pickle.dumps(source)
-    except Exception as exc:  # a System that cannot be sent
-        for count in counts:
-            failed(count, exc)
-        return rows
-
-    def send(sender: Any) -> None:
-        # From a thread, as a large System fills the pipe until the process
-        # reads it; a process that ended first leaves a broken pipe, which
-        # with SIGPIPE held back here is an error rather than a signal that
-        # could end the caller.
-        if hasattr(signal, "pthread_sigmask"):
-            signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGPIPE})
         try:
-            sender.send_bytes(data)
-        except OSError:
-            pass
-        finally:
-            sender.close()
-
-    for count in counts:
-        check()
-        results, reporter = spawn.Pipe(duplex=False)
-        inbox, sender = spawn.Pipe(duplex=False)
-        worker = spawn.Process(target=_worker,
-                               args=(reporter, inbox, count, settings),
-                               daemon=True)
-        result = None
-        hung = False
-        sending = False
-        try:
-            # Again: setting up this count let the last one's finalizers
-            # run, and a signal may have come during one.
+            # Here, not before the pipe: setting up this count let the last
+            # one's finalizers run, and a signal may have come during one.
             check()
-            try:
-                worker.start()
-            except Exception as exc:
-                failed(count, exc)
-                continue
-            finally:
-                # The process has its own ends now; with these closed, its
-                # end shows here as the end of the pipe.
-                inbox.close()
-                reporter.close()
-            threading.Thread(target=send, args=(sender,), daemon=True).start()
-            sending = True
-            while result is None:
-                check()
-                if results.poll(poll):
-                    try:
-                        result = results.recv()
-                    except EOFError:  # ended without reporting
-                        break
-            # A process stuck in teardown after reporting is waited on for
-            # two minutes at most, then stopped.
-            for _ in range(int(120 / poll)):
-                check()
-                worker.join(timeout=poll)
-                if not worker.is_alive():
-                    break
-            hung = worker.is_alive()
+            worker.start()
+        except Exception as exc:
+            return _not_started(count, exc)
         finally:
+            # The process has its own end now; with this one closed, its
+            # end shows here as the end of the pipe.
+            reporter.close()
+        while result is None:
+            check()
+            if results.poll(poll):
+                try:
+                    result = results.recv()
+                except (EOFError, OSError):  # ended without reporting
+                    break
+        # A process stuck in teardown after reporting is waited on for
+        # HUNG_AFTER_S at most, then stopped.
+        for _ in range(int(HUNG_AFTER_S / poll)):
+            check()
+            worker.join(timeout=poll)
+            if not worker.is_alive():
+                break
+        hung = worker.is_alive()
+    finally:
+        if worker.is_alive():
+            worker.terminate()
+            worker.join(timeout=10)
             if worker.is_alive():
-                worker.terminate()
-                worker.join(timeout=10)
-                if worker.is_alive():
-                    worker.kill()
-                    worker.join()
-            results.close()
-            if not sending:
-                sender.close()
-        if result is None and (worker.exitcode or 0) < 0:
-            try:
-                name = signal.Signals(-worker.exitcode).name
-            except ValueError:
-                name = f"signal {-worker.exitcode}"
-            result = ("error", f"the process was ended by {name} before it "
-                               "reported; possible causes are a crash in the "
-                               "platform or a signal from outside")
-        elif result is None:
-            result = ("error", f"the process ended (exit code "
-                               f"{worker.exitcode}) before it reported; "
-                               "possible causes are a crash in the platform "
-                               "or, from a script, a missing "
-                               "`if __name__ == \"__main__\":` guard")
-        status, value = result
-        if status == "error":
-            logger.warning("Timing %d contexts per device failed: %s", count,
-                           value)
-            rows.append({"contexts_per_device": count, "error": value})
-            continue
-        value["exit_code"] = worker.exitcode
-        value["hung_on_exit"] = hung
-        if hung:
-            logger.warning(
-                "The process timing %d contexts per device measured, then "
-                "hung as it exited and was stopped.", count)
-        elif worker.exitcode:
-            logger.warning(
-                "The process timing %d contexts per device measured, then "
-                "failed as it exited (exit code %s).", count, worker.exitcode)
-        logger.info("%d contexts per device: %.1f ns/day per replica, %.1f "
-                    "total, %.0f%% overhead", count,
-                    value["ns_per_day_per_replica"],
-                    value["ns_per_day_total"],
-                    100 * value["overhead_fraction"])
-        rows.append(value)
-    return rows
+                worker.kill()
+                worker.join()
+        results.close()
+    if result is None and (worker.exitcode or 0) < 0:
+        try:
+            name = signal.Signals(-worker.exitcode).name
+        except ValueError:
+            name = f"signal {-worker.exitcode}"
+        result = ("error", f"the process was ended by {name} before it "
+                           "reported; possible causes are a crash in the "
+                           "platform or a signal from outside")
+    elif result is None:
+        result = ("error", f"the process ended (exit code "
+                           f"{worker.exitcode}) before it reported; "
+                           "possible causes are a crash in the platform "
+                           "or, from a script, a missing "
+                           "`if __name__ == \"__main__\":` guard")
+    status, value = result
+    if status == "error":
+        logger.warning("Timing %d contexts per device failed: %s", count,
+                       value)
+        return {"contexts_per_device": count, "error": value}
+    value["exit_code"] = worker.exitcode
+    value["hung_on_exit"] = hung
+    if hung:
+        logger.warning(
+            "The process timing %d contexts per device measured, then "
+            "hung as it exited and was stopped.", count)
+    elif worker.exitcode:
+        logger.warning(
+            "The process timing %d contexts per device measured, then "
+            "failed as it exited (exit code %s).", count, worker.exitcode)
+    logger.info("%d contexts per device: %.1f ns/day per replica, %.1f "
+                "total, %.0f%% overhead", count,
+                value["ns_per_day_per_replica"],
+                value["ns_per_day_total"],
+                100 * value["overhead_fraction"])
+    return value
 
 
-def _worker(channel: Any, inbox: Any, count: int,
+def _worker(channel: Any, handoff: Any, count: int,
             settings: dict[str, Any]) -> None:
     import multiprocessing
     import os
@@ -325,13 +337,17 @@ def _worker(channel: Any, inbox: Any, count: int,
         threading.Thread(target=orphaned, daemon=True).start()
     logging.basicConfig(level=logging.WARNING)
     try:
-        prepared = pickle.loads(inbox.recv_bytes())
-        inbox.close()
+        with handoff:
+            handoff.seek(0)  # shared with the processes before this one
+            prepared = pickle.load(handoff)
         row = _measure(prepared, [count], **settings)[0]
         row["pid"] = os.getpid()
         channel.send(("ok", row))
     except BaseException as exc:
-        channel.send(("error", f"{type(exc).__name__}: {exc}"))
+        try:
+            channel.send(("error", f"{type(exc).__name__}: {exc}"))
+        except OSError:  # nobody left to tell: the parent has gone
+            os._exit(1)
 
 
 def _measure(prepared: Any, counts: list[int], *, n_replicas: int = 8,

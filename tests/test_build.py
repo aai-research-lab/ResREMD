@@ -654,6 +654,9 @@ def test_a_rest2_build_at_constant_pressure_on_a_gpu_is_warned_of(
 
     from resremd import build
 
+    if not hasattr(openmm, "CustomVolumeForce"):
+        pytest.skip("needs OpenMM 8.3 or later")
+
     # The OpenMM releases that evaluate a CustomVolumeForce on the host.
     monkeypatch.setattr(openmm, "__version__", "8.6.1")
     real = build.create_context

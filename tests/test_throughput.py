@@ -56,12 +56,14 @@ def test_the_cpu_runs_one_single_threaded_context_per_core():
         engine.close()
 
 
-def test_each_count_is_timed_in_its_own_process():
+def test_each_count_is_timed_in_its_own_process(tmp_path, monkeypatch):
     import os
     import signal
+    import tempfile
 
     import numpy as np
 
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     before = signal.getsignal(signal.SIGTERM)
     p = testsystems.lj_box()
     rows = measure((p.system, p.topology, p.positions, p.box), n_replicas=2,
@@ -73,14 +75,13 @@ def test_each_count_is_timed_in_its_own_process():
     assert all(r["exit_code"] == 0 for r in rows)
     pids = {r["pid"] for r in rows}
     assert len(pids) == 2 and os.getpid() not in pids
+    assert not os.listdir(tmp_path)  # nothing left behind
 
 
 def test_a_failing_count_is_recorded_and_the_others_reported(tmp_path,
                                                              capsys):
     """A count that fails in its process becomes a row saying why; a table
     in which every count failed makes the command fail."""
-    from resremd.cli import main
-    from resremd.system import write_prepared
     from resremd.throughput import format_rows
 
     rows = measure(testsystems.lj_box(), n_replicas=2,
@@ -142,22 +143,43 @@ def test_counts_must_be_whole_numbers(capsys):
 
 def _script(tmp_path, text, *, stdin=False):
     """Run a script in a new interpreter, as a user would: from a file, or
-    read from standard input."""
+    read from standard input. Whatever it started goes with it if it
+    overruns."""
     import os
+    import signal
     import subprocess
     import sys
 
     path = tmp_path / "script.py"
     path.write_text(text)
-    env = {**os.environ,
+    temporary = tmp_path / "tmp"
+    temporary.mkdir(exist_ok=True)
+    env = {**os.environ, "TMPDIR": str(temporary),
            "PYTHONPATH": os.pathsep.join(p for p in sys.path if p)}
-    if stdin:
-        return subprocess.run([sys.executable, "-"], input=text,
-                              cwd=tmp_path, env=env, capture_output=True,
-                              text=True, timeout=120)
-    return subprocess.run([sys.executable, str(path)], cwd=tmp_path,
-                          env=env, capture_output=True, text=True,
-                          timeout=120)
+    script = subprocess.Popen(
+        [sys.executable, "-" if stdin else str(path)], cwd=tmp_path, env=env,
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, start_new_session=True)
+    try:
+        out, err = script.communicate(text if stdin else "", timeout=120)
+    finally:
+        try:
+            os.killpg(script.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        script.wait()
+    assert not os.listdir(temporary), "the script left temporary files"
+    return subprocess.CompletedProcess(script.args, script.returncode, out,
+                                       err)
+
+
+# As pytest itself may have been started with SIGTERM ignored, which the
+# scripts would inherit.
+DEFAULT = """
+import signal
+
+signal.signal(signal.SIGTERM, signal.SIG_DFL)
+"""
 
 
 TIME_IT = """
@@ -175,8 +197,8 @@ def time_it(steps=10, counts=(1,), n_side=5):
 def test_a_script_without_a_main_guard_is_told_so(tmp_path):
     """Its timing process runs the script again; there measure refuses at
     once rather than timing, and the script's own rows name the cause."""
-    # A System larger than a pipe holds, which the process never reads,
-    # from a script that lets a broken pipe end it.
+    # A large System the process never reads, from a script that lets a
+    # broken pipe end it.
     done = _script(tmp_path, TIME_IT + """
 import signal
 
@@ -194,7 +216,7 @@ def test_where_timing_processes_cannot_start_is_said_at_once(tmp_path):
                    stdin=True)
     assert done.returncode == 1
     assert "cannot run from standard input" in done.stderr
-    done = _script(tmp_path, TIME_IT + """
+    done = _script(tmp_path, DEFAULT + TIME_IT + """
 import multiprocessing
 
 if __name__ == "__main__":
@@ -222,6 +244,47 @@ if __name__ == "__main__":
 """)
     assert done.returncode == 0, done.stderr
     assert "rows ['ok']" in done.stdout
+
+
+def test_a_process_that_reported_is_judged_by_its_exit(tmp_path):
+    """One that then fails as it exits, or hangs there, keeps its row and
+    says so."""
+    for exit, said in (("os._exit(3)", "(process failed on exit)"),
+                       ("time.sleep(600)", "(process hung on exit)")):
+        done = _script(tmp_path, f"""
+import atexit
+import os
+import time
+
+from resremd import testsystems, throughput
+
+if __name__ == "__mp_main__":
+    atexit.register(lambda: {exit})
+if __name__ == "__main__":
+    throughput.HUNG_AFTER_S = 2.0
+    rows = throughput.measure(testsystems.lj_box(), n_replicas=2,
+                              contexts_per_device=[1], steps=10, cycles=1,
+                              platform="Reference", isolate=True)
+    print(throughput.format_rows(rows, 2))
+""")
+        assert done.returncode == 0, done.stderr
+        assert said in done.stdout, done.stdout
+
+
+def test_a_report_with_nowhere_to_go_ends_the_process_quietly(tmp_path):
+    """As when its parent has gone: it just ends."""
+    done = _script(tmp_path, """
+import multiprocessing
+
+from resremd.throughput import _worker
+
+if __name__ == "__main__":
+    results, reporter = multiprocessing.Pipe(duplex=False)
+    results.close()
+    _worker(reporter, "no such file", 1, {})
+""")
+    assert done.returncode == 1
+    assert done.stderr == ""
 
 
 def test_a_count_that_cannot_start_is_recorded(monkeypatch):
@@ -308,12 +371,6 @@ if __name__ == "__main__":
     threading.Thread(target=announce, daemon=True).start()
     time_it(steps=10**7)
 """
-DEFAULT = """
-import signal
-
-# As pytest itself may have been started with SIGTERM ignored.
-signal.signal(signal.SIGTERM, signal.SIG_DFL)
-"""
 SIGNAL_ITSELF = DEFAULT + """
 import os
 from multiprocessing import popen_spawn_posix, process, util
@@ -384,9 +441,9 @@ popen_spawn_posix.Popen._launch = launch
 if __name__ == "__main__":
     time_it(steps=10**7)
 """, status=-15),
-    # A signal while a large System waits for a process that imports the
-    # script slowly: the stop does not wait for the import, nor does the
-    # broken pipe end a script that lets one.
+    # A signal while a process imports the script slowly, with a large
+    # System to read: the stop does not wait for the import, even in a
+    # script that lets a broken pipe end it.
     "during a slow import": dict(script=DEFAULT + """
 import os
 import threading
@@ -400,6 +457,14 @@ if __name__ == "__main__":
     threading.Timer(2.0, os.kill, (os.getpid(), signal.SIGTERM)).start()
     time_it(steps=10**7, n_side=10)
 """, status=-15, within=20),
+    # Killed outright while a process still imports the script: that
+    # process ends quietly once it finds its parent gone.
+    "sigkill during a slow import": dict(script=DEFAULT + """
+import time
+
+if __name__ == "__mp_main__":
+    time.sleep(3)
+""" + LONG, send="SIGKILL", status=-9, says=False),
     # A signal in a finalizer, as the second count is set up: no process
     # is started after it.
     "in a finalizer": dict(script=SIGNAL_ITSELF + """
@@ -434,7 +499,9 @@ def test_a_stopped_script_leaves_no_timing_process(tmp_path, how):
     stop = {"send": None, "says": True, "shows": None, "launches": None,
             "within": 60, **STOPS[how]}
     (tmp_path / "script.py").write_text(LAUNCHES + TIME_IT + stop["script"])
-    env = {**os.environ,
+    temporary = tmp_path / "tmp"
+    temporary.mkdir()
+    env = {**os.environ, "TMPDIR": str(temporary),
            "PYTHONPATH": os.pathsep.join(p for p in sys.path if p)}
     out, err = tmp_path / "out.txt", tmp_path / "err.txt"
     with open(out, "w") as o, open(err, "w") as e:
@@ -459,6 +526,20 @@ def test_a_stopped_script_leaves_no_timing_process(tmp_path, how):
         status = script.wait(timeout=120)
         assert time.monotonic() - started < stop["within"]
         assert status == stop["status"], err.read_text()
+        assert launched()
+        if stop["launches"]:
+            assert len(launched()) == stop["launches"]
+        if status != -signal.SIGKILL:
+            # Stopped and reaped before the script ended.
+            assert not any(_alive(pid) for pid in launched()), \
+                "a timing process was left running"
+        else:
+            # Killed outright, the script leaves its processes to see that.
+            while any(_alive(pid) for pid in launched()) and \
+                    time.monotonic() < started + 30:
+                time.sleep(0.1)
+            assert not any(_alive(pid) for pid in launched()), \
+                "a timing process was left running"
         said = err.read_text()
         assert ("Stopped by SIGTERM." in said) == stop["says"]
         # Nothing it started fails noisily on the way down, and nothing is
@@ -467,19 +548,8 @@ def test_a_stopped_script_leaves_no_timing_process(tmp_path, how):
         assert "leaked" not in said, said
         if stop["shows"]:
             assert stop["shows"] in out.read_text()
-        assert launched()
-        if stop["launches"]:
-            assert len(launched()) == stop["launches"]
-        if how != "sigkill":
-            # Stopped and reaped before the script ended.
-            assert not any(_alive(pid) for pid in launched()), \
-                "a timing process was left running"
-        else:
-            while any(_alive(pid) for pid in launched()) and \
-                    time.monotonic() < started + 30:
-                time.sleep(0.1)
-            assert not any(_alive(pid) for pid in launched()), \
-                "a timing process was left running"
+        # However it ended, it left no file behind.
+        assert not os.listdir(temporary)
     finally:
         if script.poll() is None:
             os.killpg(script.pid, signal.SIGKILL)

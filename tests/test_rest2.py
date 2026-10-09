@@ -18,6 +18,11 @@ from resremd.errors import InputError
 from resremd.ladder import geometric
 from resremd.statistics import statistical_inefficiency
 
+# OpenMM 8.3 brought the CustomVolumeForce that scales the correction.
+needs_volume_force = pytest.mark.skipif(
+    not hasattr(openmm, "CustomVolumeForce"),
+    reason="needs OpenMM 8.3 or later")
+
 md = pytest.importorskip("mdtraj")
 
 LADDER = geometric(300.0, 3000.0, 5)
@@ -226,11 +231,10 @@ def test_a_rest2_reservoir_needs_a_rest2_run(tmp_path):
                     minimize=False)
 
 
+@needs_volume_force
 def test_constant_pressure_rest2_scales_the_dispersion_correction(tmp_path):
     """At constant pressure the scaled correction acts on the barostat, so a
     run begun with it unscaled is not resumed with it scaled."""
-    if not hasattr(openmm, "CustomVolumeForce"):
-        pytest.skip("needs OpenMM 8.3 or later")
     common = dict(rest2=True, rest2_atoms=list(range(20)),
                   temperatures_K=[100.0, 150.0], exchange_interval_steps=50,
                   timestep_fs=4.0, platform="Reference", random_seed=1,
@@ -300,6 +304,7 @@ def _nvt_rest2_run(tmp_path, name, **extra):
                        **common)
 
 
+@needs_volume_force
 def test_at_constant_volume_scaling_the_correction_changes_nothing(
         tmp_path, monkeypatch):
     """The correction is a constant of each state at fixed volume: scaling
@@ -405,9 +410,9 @@ def test_the_gpu_warning_follows_the_openmm_version(monkeypatch):
         assert (text is not None) == warned, version
 
 
+@needs_volume_force
 def test_a_rest2_run_passes_its_platform_to_the_gpu_warning(tmp_path,
                                                             monkeypatch):
-    from resremd import rest2
 
     asked = []
 
