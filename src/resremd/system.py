@@ -66,8 +66,8 @@ def load_prepared(directory: str | Path) -> Prepared:
             return how(files[name])
         except Exception as exc:  # OpenMM's errors are no subclass of one
             raise InputError(
-                f"{files[name]} could not be read ({type(exc).__name__}: "
-                f"{exc}). Prepare the system again.",
+                f"{files[name]} could not be read; prepare the system "
+                f"again. {type(exc).__name__}: {exc}",
                 code="resremd.input.prepared") from exc
 
     system = read("system.xml", lambda f: openmm.XmlSerializer.deserialize(
@@ -82,13 +82,14 @@ def load_prepared(directory: str | Path) -> Prepared:
                 f"{files[name]} holds a {type(value).__name__}, not a "
                 f"{kind.__name__}. Prepare the system again.",
                 code="resremd.input.prepared")
-    positions = np.asarray(
+    positions = read("state.xml", lambda _: np.asarray(
         state.getPositions(asNumpy=True).value_in_unit(unit.nanometer),
-        dtype=float)
+        dtype=float))
     box = None
     if system.usesPeriodicBoundaryConditions():
-        box = np.asarray(state.getPeriodicBoxVectors(asNumpy=True)
-                         .value_in_unit(unit.nanometer), dtype=float)
+        box = read("state.xml", lambda _: np.asarray(
+            state.getPeriodicBoxVectors(asNumpy=True)
+            .value_in_unit(unit.nanometer), dtype=float))
     return checked(Prepared(system, topology, positions, box,
                             source=str(directory.resolve())))
 
@@ -128,18 +129,35 @@ def from_objects(system: Any, topology: Any, positions: Any,
     """Wrap objects already in memory. Positions and box in nm or Quantity."""
     from openmm import unit
 
-    def nm(value):
+    def number(c):
+        return float(c.value_in_unit(unit.nanometer)
+                     if unit.is_quantity(c) else c)
+
+    def nm(value, what):
         if value is None:
             return None
-        if unit.is_quantity(value):
-            value = value.value_in_unit(unit.nanometer)
-        return np.array([[float(c) for c in row] for row in value])
+        try:
+            if unit.is_quantity(value):
+                value = value.value_in_unit(unit.nanometer)
+            # Rows, or their numbers, may be quantities themselves: OpenMM
+            # gives box vectors as a list of three.
+            return np.array([[number(c) for c in (
+                row.value_in_unit(unit.nanometer) if unit.is_quantity(row)
+                else row)] for row in value])
+        except (TypeError, ValueError) as exc:
+            raise InputError(
+                f"The {what} are rows of three numbers, in nm or as a "
+                f"Quantity of length ({type(exc).__name__}: {exc}).",
+                code="resremd.input.type") from None
 
-    box = nm(box)
+    if positions is None:
+        raise InputError("Positions are needed with a System.",
+                         code="resremd.input.type")
+    box = nm(box, "box vectors")
     if box is None and system.usesPeriodicBoundaryConditions():
-        vectors = system.getDefaultPeriodicBoxVectors()
-        box = nm(vectors)
-    return checked(Prepared(system, topology, nm(positions), box))
+        box = nm(system.getDefaultPeriodicBoxVectors(), "box vectors")
+    return checked(Prepared(system, topology, nm(positions, "positions"),
+                            box))
 
 
 def checked(prepared: Prepared) -> Prepared:

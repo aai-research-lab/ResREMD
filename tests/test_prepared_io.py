@@ -56,3 +56,23 @@ def test_a_damaged_prepared_directory_is_named(tmp_path):
         (tmp_path / "state.xml").read_text())
     with pytest.raises(InputError, match="holds a State, not a System"):
         load_prepared(tmp_path)
+    # A state without positions.
+    import openmm
+
+    (tmp_path / "system.xml").write_text(system)
+    context = openmm.Context(box.system, openmm.VerletIntegrator(0.001),
+                             openmm.Platform.getPlatformByName("Reference"))
+    context.setPositions(box.positions)
+    (tmp_path / "state.xml").write_text(openmm.XmlSerializer.serialize(
+        context.getState(getEnergy=True)))
+    with pytest.raises(InputError, match="state.xml could not be read"):
+        load_prepared(tmp_path)
+
+
+def test_a_system_in_memory_needs_no_box_given():
+    """A periodic System's own box stands in, as OpenMM gives it."""
+    from resremd.system import from_objects
+
+    box = testsystems.lj_box()
+    prepared = from_objects(box.system, box.topology, box.positions)
+    assert np.allclose(prepared.box, box.box)
