@@ -11,7 +11,10 @@ cycle that is not dynamics (timed from cycles of zero steps). The command
 times each count in a fresh process. Aggregate throughput that still grows
 at the largest count means the device has room for more concurrent
 contexts; a large overhead share means longer exchange intervals, or fewer
-evaluations per cycle, would pay more than hardware.
+evaluations per cycle, would pay more than hardware. Each cycle moves
+every replica to another temperature, as if every exchange were accepted,
+so the cost of rescaling velocities is an upper bound; reservoir exchanges
+and the writing of output are not timed.
 """
 
 from __future__ import annotations
@@ -32,7 +35,7 @@ def measure(prepared: Any, *, contexts_per_device: list[int] | None = None,
     device, after one warm-up cycle each. Returns one row per count.
 
     ``prepared`` is a prepared directory, a Prepared system, or (system,
-    topology, positions, box). With ``isolate`` (as the command line does)
+    topology, positions[, box]). With ``isolate`` (as the command line does)
     each count is timed in a fresh process: none inherits another's device
     state, a count that fails is recorded and the others still run, and a
     process that fails as it exits, after its row is in, is reported rather
@@ -54,9 +57,9 @@ def measure(prepared: Any, *, contexts_per_device: list[int] | None = None,
     import numbers
 
     from .errors import InputError
-    from .options import (CPU_THREADS, DEVICES, ENSEMBLE, PLATFORM,
-                          PRECISION, RANDOM_SEED, REST2, REST2_SELECTION,
-                          _check_one)
+    from .options import (CPU_THREADS, ENSEMBLE, PLATFORM, PRECISION,
+                          RANDOM_SEED, REST2, REST2_SELECTION, _check_one,
+                          device_indices)
     from .system import from_objects, load_prepared, select_atoms
 
     if isolate:
@@ -105,24 +108,25 @@ def measure(prepared: Any, *, contexts_per_device: list[int] | None = None,
             raise InputError(f"{name} takes a number above 0, not "
                              f"{value!r}.", code="resremd.input.range")
         settings[name] = float(value)
-    for option in (ENSEMBLE, PLATFORM, PRECISION, CPU_THREADS, DEVICES,
-                   REST2, REST2_SELECTION, RANDOM_SEED):
+    for option in (ENSEMBLE, PLATFORM, PRECISION, CPU_THREADS, REST2,
+                   REST2_SELECTION, RANDOM_SEED):
         value = bound.arguments[option.name]
         if isinstance(value, numbers.Integral) and \
                 not isinstance(value, bool):
             value = int(value)  # a numpy integer, say
         settings[option.name] = _check_one(option, value)
+    settings["devices"] = device_indices(bound.arguments["devices"])
     source = prepared
     if isinstance(prepared, (str, Path)):
         prepared = load_prepared(prepared)
     elif not hasattr(prepared, "system"):
-        try:
-            prepared = source = from_objects(*prepared)
-        except TypeError:
+        if not isinstance(prepared, (tuple, list)) or \
+                len(prepared) not in (3, 4):
             raise InputError(
                 "measure() times a prepared directory, a Prepared system or "
-                f"(system, topology, positions, box), not {prepared!r:.80}.",
-                code="resremd.input.type") from None
+                "(system, topology, positions[, box]), not "
+                f"{prepared!r:.80}.", code="resremd.input.type")
+        prepared = source = from_objects(*prepared)
     if bound.arguments["rest2"]:
         select_atoms(prepared.topology, bound.arguments["rest2_selection"],
                      option="rest2")
@@ -296,8 +300,9 @@ def _one(spawn: Any, handoff: Any, count: int, settings: dict[str, Any],
         results, reporter = spawn.Pipe(duplex=False)
     except OSError as exc:  # out of descriptors, say
         return _not_started(count, exc)
+    level = logging.getLogger("resremd").getEffectiveLevel()
     worker = spawn.Process(target=_worker,
-                           args=(reporter, handoff, count, settings),
+                           args=(reporter, handoff, count, settings, level),
                            daemon=True)
     result = None
     hung = False
@@ -317,9 +322,18 @@ def _one(spawn: Any, handoff: Any, count: int, settings: dict[str, Any],
             check()
             if results.poll(poll):
                 try:
-                    result = results.recv()
+                    message = results.recv()
                 except (EOFError, OSError):  # ended without reporting
                     break
+                if message[0] == "log":
+                    # The process's own log, through the caller's logging,
+                    # as far as the caller logs now.
+                    record = logging.makeLogRecord(message[1])
+                    log = logging.getLogger(record.name)
+                    if log.isEnabledFor(record.levelno):
+                        log.handle(record)
+                else:
+                    result = message
         # A process stuck in teardown after reporting is waited on for
         # HUNG_AFTER_S at most, then stopped.
         for _ in range(int(HUNG_AFTER_S / poll)):
@@ -365,16 +379,11 @@ def _one(spawn: Any, handoff: Any, count: int, settings: dict[str, Any],
         logger.warning(
             "The process timing %d contexts per device measured, then "
             "failed as it exited (exit code %s).", count, worker.exitcode)
-    logger.info("%d contexts per device: %.1f ns/day per replica, %.1f "
-                "total, %.0f%% overhead", count,
-                value["ns_per_day_per_replica"],
-                value["ns_per_day_total"],
-                100 * value["overhead_fraction"])
     return value
 
 
 def _worker(channel: Any, handoff: Any, count: int,
-            settings: dict[str, Any]) -> None:
+            settings: dict[str, Any], level: int = logging.WARNING) -> None:
     import multiprocessing
     import os
     import pickle
@@ -395,8 +404,20 @@ def _worker(channel: Any, handoff: Any, count: int,
         # Nor may it outlive a parent that was killed outright (from here
         # on: while it still imports the calling script, it cannot tell).
         threading.Thread(target=orphaned, daemon=True).start()
-    logging.basicConfig(level=logging.WARNING,
-                        format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
+    # What this process logs goes to the caller, to be handled as its own,
+    # so as much is logged as the caller logs, where the caller logs it.
+    lock = threading.Lock()
+
+    def send(message: tuple) -> None:  # from any of the engine's threads
+        with lock:
+            channel.send(message)
+
+    log = logging.getLogger("resremd")
+    log.setLevel(level)
+    log.propagate = False
+    # Only this: handlers the script set up as it was imported again here
+    # would write what the caller writes too.
+    log.handlers[:] = [_Forward(send)]
     try:
         if isinstance(handoff, str):  # a prepared directory
             prepared = handoff
@@ -406,12 +427,41 @@ def _worker(channel: Any, handoff: Any, count: int,
                 prepared = pickle.load(handoff)
         row = _measure(prepared, [count], **settings)[0]
         row["pid"] = os.getpid()
-        channel.send(("ok", row))
+        send(("ok", row))
     except BaseException as exc:
         try:
-            channel.send(("error", f"{type(exc).__name__}: {exc}"))
+            send(("error", f"{type(exc).__name__}: {exc}"))
         except OSError:  # nobody left to tell: the parent has gone
             os._exit(1)
+
+
+class _Forward(logging.Handler):
+    """Sends a timing process's log records to its caller."""
+
+    def __init__(self, send: Any) -> None:
+        super().__init__()
+        self.send = send
+
+    # What the caller needs to place and show a record; plain values, so
+    # that nothing the record carried can fail to arrive.
+    FIELDS = ("name", "levelno", "levelname", "pathname", "filename",
+              "module", "lineno", "funcName", "created", "msecs",
+              "relativeCreated", "thread", "threadName", "process",
+              "processName")
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            # The message with any traceback, as a handler would show it.
+            message = logging.Formatter("%(message)s").format(record)
+        except Exception:
+            message = f"unformattable log record: {record.msg!r} " \
+                      f"{record.args!r}"
+        fields = {k: getattr(record, k, None) for k in self.FIELDS}
+        fields.update(msg=message, args=None)
+        try:
+            self.send(("log", fields))
+        except Exception:  # nobody left to tell
+            pass
 
 
 def _measure(prepared: Any, counts: list[int], *, n_replicas: int = 8,
@@ -423,6 +473,8 @@ def _measure(prepared: Any, counts: list[int], *, n_replicas: int = 8,
              random_seed: int = 1) -> list[dict[str, Any]]:
     """The timings, in this process. ``ensemble`` is as for a run: left
     out, the prepared System decides (its barostat, if it has one)."""
+    import math
+
     from .engine import Engine, Replica
     from .ladder import geometric
     from .system import load_prepared, select_atoms
@@ -472,8 +524,12 @@ def _measure(prepared: Any, counts: list[int], *, n_replicas: int = 8,
                 t0 = time.perf_counter()
                 for _ in range(n_cycles):
                     # A rotation, as exchanges move replicas between
-                    # temperatures and so between contexts' settings.
+                    # temperatures and so between contexts' settings, with
+                    # the velocities rescaled as an exchange rescales them
+                    # (as if every exchange were accepted).
                     order = temps[1:] + temps[:1]
+                    for replica, old, new in zip(replicas, temps, order):
+                        replica.velocity_scale *= math.sqrt(new / old)
                     temps[:] = order
                     if scales is not None:
                         scales[:] = scales[1:] + scales[:1]

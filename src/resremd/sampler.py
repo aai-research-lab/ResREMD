@@ -52,7 +52,7 @@ from .acceptance import accept, log_acceptance, log_acceptance_reservoir
 from .engine import Engine, Replica
 from .errors import InputError, ResumeError
 from .ladder import resolve as resolve_ladder
-from .options import RUN, resolve as resolve_options
+from .options import RUN, device_indices, resolve as resolve_options
 from .output import CsvLog, DcdTrajectory, write_pdb
 from .reservoir import Reservoir, write_json
 from .stopping import StopRequests
@@ -151,12 +151,7 @@ def plan(options: dict[str, Any], reservoir_temperature_K: float | None
     else:
         raise InputError("`save_states` must be `all`, `lowest` or a list of "
                          "state indices.", code="resremd.input.choice")
-    if options["devices"] is not None:
-        try:
-            options["devices"] = [int(d) for d in options["devices"]]
-        except (TypeError, ValueError):
-            raise InputError("`devices` must be GPU indices.",
-                             code="resremd.input.type")
+    options["devices"] = device_indices(options["devices"])
     return {
         "temperatures_K": temperatures,
         "production_steps": steps,

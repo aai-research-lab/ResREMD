@@ -215,29 +215,42 @@ def build_parser() -> argparse.ArgumentParser:
                     "and the share of a cycle that is not dynamics. Use it "
                     "to choose `contexts_per_device` and the exchange "
                     "interval on a GPU.")
-    p_thr.add_argument("--prepared", required=True, metavar="DIR")
-    p_thr.add_argument("--n-replicas", type=_count(2), default=8)
+    p_thr.add_argument("--prepared", required=True, metavar="DIR",
+                       help="A prepared system's directory.")
+    p_thr.add_argument("--n-replicas", type=_count(2), default=8,
+                       help="Replicas to run (default 8).")
     p_thr.add_argument("--contexts-per-device", type=_positive, nargs="+",
-                       default=[1, 2, 4, 8], metavar="N")
+                       default=[1, 2, 4, 8], metavar="N",
+                       help="The counts to time, each in a process of its "
+                            "own (default 1 2 4 8).")
     p_thr.add_argument("--steps", type=_positive, default=500,
                        help="MD steps per cycle, the exchange interval "
                             "(default 500).")
-    p_thr.add_argument("--cycles", type=_positive, default=10)
-    p_thr.add_argument("--timestep-fs", type=_above_zero, default=2.0)
+    p_thr.add_argument("--cycles", type=_positive, default=10,
+                       help="Cycles timed for each count, after one to warm "
+                            "up (default 10).")
+    p_thr.add_argument("--timestep-fs", type=_above_zero, default=2.0,
+                       help="Timestep in fs (default 2.0).")
     p_thr.add_argument("--platform", default="auto",
-                       choices=PLATFORM.choices)
+                       choices=PLATFORM.choices,
+                       help="OpenMM platform (default auto).")
     p_thr.add_argument("--precision", default="mixed",
-                       choices=("mixed", "single", "double"))
-    p_thr.add_argument("--devices", type=int, nargs="+", metavar="INDEX")
+                       choices=("mixed", "single", "double"),
+                       help="Floating-point precision on a GPU (default "
+                            "mixed).")
+    p_thr.add_argument("--devices", type=int, nargs="+", metavar="INDEX",
+                       help="GPU indices; left out, one device.")
     p_thr.add_argument("--rest2", action="store_true",
                        help="Time REST2 replicas, with their extra energy "
                             "evaluations.")
     p_thr.add_argument("--rest2-selection", default="solute",
-                       choices=("all", "not water", "solute"))
+                       choices=("all", "not water", "solute"),
+                       help="The atoms REST2 heats (default solute).")
     p_thr.add_argument("--ensemble", choices=("nvt", "npt"),
                        help="As for a run; left out, the prepared System "
                             "decides (its barostat, if it has one).")
-    p_thr.add_argument("--json", action="store_true")
+    p_thr.add_argument("--json", action="store_true",
+                       help="The rows as JSON rather than a table.")
     return parser
 
 

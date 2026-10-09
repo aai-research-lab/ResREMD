@@ -671,6 +671,23 @@ def _check_one(option: Option, value: Any) -> Any:
     return value
 
 
+def device_indices(devices: Any) -> list[int] | None:
+    """GPU indices, as a run and the throughput command both take them: a
+    list of whole numbers of at least 0 (numpy's included), never a bool,
+    a fraction or a word."""
+    import numbers
+
+    if devices is None:
+        return None
+    items = list(devices) if isinstance(devices, (list, tuple)) else [None]
+    if not all(isinstance(d, numbers.Integral) and not isinstance(d, bool)
+               and d >= 0 for d in items):
+        raise InputError(f"`devices` must be GPU indices, whole numbers of "
+                         f"at least 0; got {devices!r}.",
+                         code="resremd.input.type")
+    return [int(d) for d in items]
+
+
 def resolve(schema: Schema, given: dict[str, Any] | None) -> dict[str, Any]:
     """Defaults overlaid with what was given, each value checked.
 

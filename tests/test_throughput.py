@@ -87,10 +87,12 @@ def test_a_failing_count_is_recorded_and_the_others_reported(tmp_path,
     from resremd.throughput import format_rows
 
     # A platform this OpenMM may have but does not here.
-    missing = next(name for name in ("HIP", "OpenCL", "CUDA")
-                   if name not in {openmm.Platform.getPlatform(i).getName()
-                                   for i in range(
-                                       openmm.Platform.getNumPlatforms())})
+    here = {openmm.Platform.getPlatform(i).getName()
+            for i in range(openmm.Platform.getNumPlatforms())}
+    missing = next((name for name in ("HIP", "OpenCL", "CUDA")
+                    if name not in here), None)
+    if missing is None:
+        pytest.skip("every GPU platform is here")
     rows = measure(testsystems.lj_box(), n_replicas=2,
                    contexts_per_device=[1, 2], steps=10, cycles=1,
                    platform=missing, isolate=True)
@@ -180,6 +182,99 @@ def test_settings_are_checked_as_for_a_run():
                    cycles=1, timestep_fs=np.float32(2.0),
                    platform="Reference")
     json.dumps(rows)
+
+
+def test_devices_are_checked_as_for_a_run(tmp_path):
+    import numpy as np
+
+    import resremd
+    from resremd.errors import InputError
+
+    small = dict(n_replicas=2, contexts_per_device=[1], steps=10, cycles=1,
+                 platform="Reference")
+    for devices in (["a"], [1.7], [-1], [True], ["0"]):
+        with pytest.raises(InputError, match="GPU indices"):
+            measure(testsystems.lj_box(), devices=devices, **small)
+        with pytest.raises(InputError, match="GPU indices"):
+            resremd.run(testsystems.lj_box(), output=str(tmp_path / "run"),
+                        temperatures_K=[100.0, 120.0], production_steps=10,
+                        exchange_interval_steps=10, platform="Reference",
+                        devices=devices)
+    rows = measure(testsystems.lj_box(), n_replicas=2,
+                   contexts_per_device=[1], steps=10, cycles=1,
+                   platform="Reference", devices=[np.int64(0)])
+    json.dumps(rows)
+
+
+def test_exchanges_are_timed_with_their_velocity_rescaling(monkeypatch):
+    """As in a run, a replica that moves to another temperature has its
+    velocities rescaled, which costs a GPU a round trip."""
+    import numpy as np
+
+    from resremd.engine import Engine
+
+    seen = []
+    run = Engine.run
+
+    def watched(self, replicas, temperatures, *args, **kwargs):
+        seen.append((list(temperatures),
+                     [r.velocity_scale for r in replicas]))
+        return run(self, replicas, temperatures, *args, **kwargs)
+
+    monkeypatch.setattr(Engine, "run", watched)
+    measure(testsystems.lj_box(), n_replicas=4, contexts_per_device=[1],
+            steps=10, cycles=2, platform="Reference")
+    # Each cycle after the first: from the last temperature to this one.
+    for (before, _), (after, scales) in zip(seen, seen[1:]):
+        assert np.allclose(scales, np.sqrt(np.array(after) / before))
+
+
+def test_timing_processes_log_through_their_caller(tmp_path):
+    """What a timing process logs is handled by the caller's logging: once,
+    where the caller logs, and only as much as the caller logs."""
+    done = _script(tmp_path, """
+import logging
+
+from resremd import testsystems
+from resremd.throughput import measure
+
+def time_it(count):
+    # devices on Reference: a warning from the timing process.
+    measure(testsystems.lj_box(), n_replicas=2, contexts_per_device=[count],
+            steps=10, cycles=1, platform="Reference", devices=[0],
+            isolate=True)
+
+if __name__ == "__main__":
+    logging.basicConfig(filename="log.txt", level=logging.INFO)
+    time_it(1)
+    logging.getLogger().setLevel(logging.WARNING)
+    time_it(2)
+    logging.disable(logging.CRITICAL)
+    time_it(3)
+""")
+    assert done.returncode == 0, done.stderr
+    assert "contexts per device" not in done.stderr, done.stderr
+    assert "ignored" not in done.stderr, done.stderr
+    log = (tmp_path / "log.txt").read_text()
+    assert log.count("1 contexts per device:") == 1, log
+    assert "2 contexts per device:" not in log, log
+    assert log.count("`devices` is ignored") == 2, log
+
+
+def test_a_system_in_memory_is_given_whole():
+    from resremd.errors import InputError
+
+    box = testsystems.lj_box()
+    small = dict(n_replicas=2, contexts_per_device=[1], steps=10, cycles=1,
+                 platform="Reference")
+    assert measure((box.system, box.topology, box.positions), **small)
+    for wrong, match in (((box.system, box.topology), "a Prepared"),
+                         ((box.system, box.topology, box.positions, None,
+                           None), "a Prepared"),
+                         ((box.system, box.topology,
+                           box.positions.ravel()), "rows of three")):
+        with pytest.raises(InputError, match=match):
+            measure(wrong, **small)
 
 
 def test_counts_that_ran_alike_are_not_told_apart():
