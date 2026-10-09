@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import __version__
-from .errors import ResRemdError
+from .errors import InputError, ResRemdError
 from .options import CLUSTER, GENERATE, IMPORT, PLATFORM, RUN, Option, Schema
 
 logger = logging.getLogger("resremd")
@@ -106,7 +106,8 @@ def template(schema: Schema) -> str:
     """A settings file with every option, its help, and its default."""
     lines = [f"# resremd {schema.name}: {schema.description}", ""]
     for group_name, options in schema.groups():
-        lines.append(f"# --- {group_name} " + "-" * max(3, 60 - len(group_name)))
+        lines.append(f"# --- {group_name} "
+                     + "-" * max(3, 60 - len(group_name)))
         for option in options:
             for text in textwrap.wrap(option.help, 76):
                 lines.append(f"# {text}")
@@ -180,10 +181,24 @@ def build_parser() -> argparse.ArgumentParser:
                                description=CLUSTER.description)
     _add_options(p_clu, CLUSTER)
 
-    p_sum = sub.add_parser("summary", help="Exchange statistics of a run.")
-    p_sum.add_argument("run_dir")
+    p_sum = sub.add_parser(
+        "summary", help="Exchange statistics of a run.",
+        description="Exchange statistics of a ResREMD run, or of a run of "
+                    "OpenMM's ReplicaExchangeSampler (the directory its "
+                    "ReplicaExchangeReporter wrote).")
+    p_sum.add_argument("run_dir", help="The run's directory.")
     p_sum.add_argument("--json", action="store_true",
                        help="Print the summary as JSON.")
+    p_sum.add_argument("--temperatures-K", type=float, nargs="+",
+                       metavar="T",
+                       help="For a run of OpenMM's sampler: its states' "
+                            "temperatures, in its order (checked against "
+                            "its energies when the states differ in "
+                            "temperature only).")
+    p_sum.add_argument("--timestep-fs", type=_above_zero, metavar="FS",
+                       help="For a run of OpenMM's sampler whose DCD "
+                            "headers do not give it: the timestep, to give "
+                            "the time simulated.")
 
     p_opt = sub.add_parser("options",
                            help="Print a settings file with every option.")
@@ -277,10 +292,28 @@ def main(argv: list[str] | None = None) -> int:
                 import_trajectories(**_settings(args, IMPORT))
         elif args.command == "summary":
             from .analysis import format_summary, summarize
+            from .openmm_runs import (OpenMMRun, format_openmm_summary,
+                                      is_openmm_run)
 
-            summary = summarize(args.run_dir)
-            print(json.dumps(summary, indent=2) if args.json
-                  else format_summary(summary))
+            if not is_openmm_run(args.run_dir) and not (
+                    Path(args.run_dir) / "manifest.json").exists():
+                raise InputError(
+                    f"{args.run_dir} holds neither a ResREMD run "
+                    "(manifest.json) nor a run of OpenMM's sampler "
+                    "(log.csv).", code="resremd.input.missing")
+            if is_openmm_run(args.run_dir):
+                summary = OpenMMRun(
+                    args.run_dir, temperatures_K=args.temperatures_K,
+                    timestep_fs=args.timestep_fs).summary()
+                text = format_openmm_summary(summary)
+            else:
+                if args.temperatures_K or args.timestep_fs:
+                    parser.error("--temperatures-K and --timestep-fs are for "
+                                 "a run of OpenMM's sampler; a ResREMD run "
+                                 "records its own.")
+                summary = summarize(args.run_dir)
+                text = format_summary(summary)
+            print(json.dumps(summary, indent=2) if args.json else text)
         elif args.command == "options":
             schema = {"run": RUN, "generate": GENERATE,
                       "import": IMPORT, "cluster": CLUSTER}[args.which]

@@ -310,6 +310,50 @@ out = rw.weights(300.0, discard_fraction=0.1)
 # out["weights"][k][i]: frame out["first_frame"] + i of state k's trajectory
 ```
 
+## Runs of OpenMM's own sampler
+
+OpenMM 8.6 has a replica exchange sampler of its own,
+`openmm.app.ReplicaExchangeSampler`. ResREMD reads the directory its
+`ReplicaExchangeReporter` writes, so a run of either is summarised and
+reweighted the same way. Give the reporter `energy=True` for MBAR, and
+`trajectoryPerState=True` with `trajectoryFormat="dcd"` for frames to
+weight.
+
+```bash
+resremd summary remd_openmm --temperatures-K 300 330 363 400
+```
+
+```python
+run = resremd.OpenMMRun("remd_openmm", temperatures_K=[300, 330, 363, 400])
+print(resremd.format_openmm_summary(run.summary()))
+out = run.weights(temperature_K=300.0, discard_fraction=0.1)
+# out["weights"][k][i]: frame out["first_frame"] + i of state_<k>.dcd
+```
+
+- **States** are the sampler's, in its order. Frames are weighted to any
+  of them (`run.weights(state=0)`), whatever the states vary. When they
+  differ in temperature only, `temperatures_K` lets frames be weighted to
+  any temperature they overlap. The energies check the temperatures'
+  ratios, not the first one, so give the sampler's values exactly. If a
+  resume changed the temperatures' ratios, each part is weighted to its
+  own states, with `frames`; a resume that scaled every temperature by one
+  factor, or changed other states, cannot be seen in the files, so keep
+  the states when resuming.
+- **Swap acceptance** is estimated from the energies, as the mean chance
+  that a swap between neighbouring states is accepted, since the sampler
+  does not log its attempts. Round trips are counted in the logged rows.
+- **MBAR is for runs in one fixed box** for now; a run at constant
+  pressure, or with replicas in boxes of their own, is summarised, but
+  not weighted. The boxes are read from `volume.csv` (`volume=True`), the
+  DCD trajectories, or the checkpoints (`checkpoints=True`, which also
+  name a barostat); when none of them is there, give `fixed_box=True` if
+  every replica was in one fixed box.
+- **A reservoir** can be made from a state's frames, once those from
+  before it equilibrated are left out (across temperatures at constant
+  pressure the sampler's states are not exact samples):
+  `resremd reservoir import --trajectories state_3_equilibrated.dcd
+  --topology system.pdb --temperature-K 400 --output reservoir`.
+
 ## Stopping and resuming
 
 `SIGINT` or `SIGTERM` (what a batch scheduler sends before its time limit)

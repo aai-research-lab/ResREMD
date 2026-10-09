@@ -24,6 +24,7 @@ from .build import import_trajectories as import_reservoir
 from .clusters import cluster_reservoir
 from .errors import ResRemdError
 from .mbar import TemperatureReweighting
+from .openmm_runs import OpenMMRun, format_openmm_summary
 from .options import CLUSTER, GENERATE, IMPORT, RUN
 from .reservoir import Reservoir
 from .sampler import run
@@ -32,6 +33,7 @@ __all__ = [
     "__version__", "run", "generate_reservoir", "import_reservoir",
     "cluster_reservoir",
     "Reservoir", "summarize", "format_summary", "reservoir_coverage",
-    "TemperatureReweighting", "ResRemdError",
+    "TemperatureReweighting", "OpenMMRun", "format_openmm_summary",
+    "ResRemdError",
     "RUN", "GENERATE", "IMPORT", "CLUSTER",
 ]
