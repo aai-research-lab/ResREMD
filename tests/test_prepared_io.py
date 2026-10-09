@@ -147,12 +147,13 @@ def test_a_refused_box_is_explained():
         "unitcell.reducePeriodicBoxVectors does the adding, but may leave a "
         "value just past a limit, to be moved just inside.")
     # Off the reduced form by a shift of the lattice (b_x over a_x/2; c_y
-    # over b_y/2, though under half of b's length): reducing.
-    for skewed in ([[side, 0, 0], [0.6 * side, side, 0], [0, 0, side]],
-                   [[side, 0, 0], [0.4 * side, 0.6 * side, 0],
-                    [0, 0.35 * side, side]]):
-        refused(skewed)
-        same_lattice(skewed, taken(nm(reducePeriodicBoxVectors(skewed))))
+    # over b_y/2, though under half of b's length): reduced, it is taken.
+    for unreduced in ([[side, 0, 0], [0.6 * side, side, 0], [0, 0, side]],
+                      [[side, 0, 0], [0.4 * side, 0.6 * side, 0],
+                       [0, 0.35 * side, side]]):
+        refused(unreduced)
+        reduced = nm(reducePeriodicBoxVectors(unreduced))
+        same_lattice(unreduced, taken(reduced))
     # Just past a limit, as reducing can leave it (c_x one step beyond
     # -a_x/2): moved inside.
     dodecahedron = nm(computePeriodicBoxVectors(
@@ -183,7 +184,7 @@ def test_a_refused_box_is_explained():
         70.5288 * unit.degrees))
     refused(octahedron.T)
     taken(octahedron)
-    # No volume, however oriented: no remedy, as none can work.
+    # No volume, or too little to trust, however oriented: no remedy.
     flat = np.array([[10, 0, 0], [3, 10, 0], [6e-4, 8e-4, 0]]) @ turn.T
     thin = np.array([[1, 0, 0], [0.5, 1e-15, 0], [0, 0, 1]]) @ turn.T
     for wrong in (np.diag([side, side, 0.0]), flat, thin,
@@ -191,8 +192,8 @@ def test_a_refused_box_is_explained():
         assert refused(wrong).endswith(
             "cannot be used: its vectors span no volume, or too little to "
             "trust.")
-    # Thin but in OpenMM's orientation (its volume exact), or not too thin
-    # to trust: the note.
+    # Thin, but with a along x and b in the xy plane (a zero volume is then
+    # found exactly), or not too thin to trust: the remedy message.
     for wrong in ([[1, 0, 0], [0.6, 1e-13, 0], [0, 0, 1]],
                   np.array([[1, 0, 0], [0.5, 1e-11, 0], [0, 0, 1]]) @ turn.T):
         assert "OpenMM needs" in refused(wrong)
@@ -201,7 +202,7 @@ def test_a_refused_box_is_explained():
         wrong = np.array([[1, 0, 0], [1, b_y, 0], [0, 0, 1]]) @ turn.T
         assert ("OpenMM needs" in refused(wrong)) == trusted
     # Volume, skewed (well within 1e12), turned or of unequal vectors: the
-    # note, not "no volume", and never anything but an InputError.
+    # remedy message, not "no volume", and never anything but an InputError.
     skew = np.array([[3, 0, 0], [3e9 + 0.3, 3.3, 0], [0, 0, 2.7]])
     unequal = np.array([[1e200, 1e-200, 0], [0, 1, 0], [0, 0, 1]])
     with np.errstate(all="raise"):

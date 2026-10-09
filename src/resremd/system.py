@@ -61,6 +61,7 @@ def load_prepared(directory: str | Path) -> Prepared:
             f"{directory} is not a prepared system: {', '.join(missing)} "
             "missing. It needs system.xml, state.xml and topology.pdb.",
             code="resremd.input.prepared")
+
     def read(name: str, how: Any) -> Any:
         try:
             return how(files[name])
@@ -212,14 +213,16 @@ def checked(prepared: Prepared) -> Prepared:
 
 def _flat(box: np.ndarray) -> bool:
     """Whether a box's vectors span no volume, or too little to trust. A
-    box in OpenMM's orientation is flat only if a_x, b_y or c_z is 0 (its
-    volume is then exact); any other when its vectors, made unit vectors,
-    span under 1e-12, some thousand times round-off."""
+    box with a along x and b in the xy plane is flat exactly when a_x, b_y
+    or c_z is 0, so a zero volume is found exactly; any other box is flat
+    when its vectors, made unit vectors, span at most 1e-12, a few
+    thousand times round-off."""
     if box[0, 1] == box[0, 2] == box[1, 2] == 0:  # exact for this form
         return 0 in (box[0, 0], box[1, 1], box[2, 2])
     with np.errstate(all="ignore"):
-        # Each vector made a unit vector, scaling first so that none under-
-        # or overflows; a vector of zeros gives nan, and counts as flat.
+        # Each vector made a unit vector, scaling first so that no length
+        # under- or overflows (a component that underflows is negligible);
+        # a vector of zeros gives nan, and counts as flat.
         rows = box / np.abs(box).max(axis=1, keepdims=True)
         rows /= np.linalg.norm(rows, axis=1, keepdims=True)
         return not abs(np.linalg.det(rows)) > 1e-12
@@ -417,7 +420,9 @@ def subset_topology(topology: Any, indices: np.ndarray,
         # Topologies carry their box in more than one form (a Quantity of
         # Vec3s, or Vec3s of Quantities); write it back in one.
         def nm(x):
-            return x.value_in_unit(unit.nanometer) if unit.is_quantity(x) else x
+            if unit.is_quantity(x):
+                return x.value_in_unit(unit.nanometer)
+            return x
 
         rows = [Vec3(*(float(nm(c)) for c in nm(v))) for v in vectors]
         sub.setPeriodicBoxVectors(rows * unit.nanometer)
