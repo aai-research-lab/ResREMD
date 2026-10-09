@@ -185,14 +185,38 @@ def checked(prepared: Prepared) -> Prepared:
             raise InputError(f"The box {box.tolist()} is not all finite.",
                              code="resremd.input.prepared")
         refused = _box_refused(box)
+        if refused and _flat(box):
+            raise InputError(f"The box {box.tolist()} cannot be used: its "
+                             "vectors span no volume.",
+                             code="resremd.input.prepared")
         if refused:
             raise InputError(
                 f"The box {box.tolist()} cannot be used: {refused} OpenMM "
-                "takes a along x and b in the xy plane, with a_x, b_y and "
-                "c_z positive, |b_x| and |c_x| at most a_x/2, and |c_y| at "
-                f"most b_y/2. {_box_remedy(box)}",
-                code="resremd.input.prepared")
+                "needs a along x and b in the xy plane, a_x, b_y and c_z "
+                "positive, |b_x| and |c_x| at most a_x/2, and |c_y| at most "
+                "b_y/2. If you gave the vectors as columns, give them as "
+                "rows. Otherwise rotate the box, the positions and any "
+                "reference positions or fixed directions in the System "
+                "together into that orientation (a rotation, not a "
+                "reflection; values off that orientation only by round-off "
+                "can be set to 0), flip a if a_x < 0, b if b_y < 0 and c if "
+                "c_z < 0, and add whole multiples of a and b to later "
+                "vectors: flips and additions keep the lattice. "
+                "openmm.app.internal.unitcell.reducePeriodicBoxVectors does "
+                "the adding, but may leave a value just past a limit, to be "
+                "moved just inside.", code="resremd.input.prepared")
     return prepared
+
+
+def _flat(box: np.ndarray) -> bool:
+    """Whether a box's vectors span no volume, as far as floating point
+    can tell."""
+    if box[0, 1] == box[0, 2] == box[1, 2] == 0:  # exact for this form
+        return 0 in (box[0, 0], box[1, 1], box[2, 2])
+    with np.errstate(all="ignore"):
+        scaled = box / np.abs(box).max()
+        return not abs(np.linalg.det(scaled)) > \
+            1e-12 * np.prod(np.linalg.norm(scaled, axis=1))
 
 
 def _box_refused(box: np.ndarray) -> str | None:
@@ -205,52 +229,6 @@ def _box_refused(box: np.ndarray) -> str | None:
     except Exception as exc:
         return str(exc).strip()
     return None
-
-
-def _box_remedy(box: np.ndarray) -> str:
-    """What would put a refused box right, as far as can be told from it."""
-    lengths = np.linalg.norm(box, axis=1)
-    volume = np.linalg.det(box)
-    if abs(volume) <= 1e-9 * np.prod(lengths):
-        return "Its vectors span no volume."
-    if volume < 0:
-        return ("Its vectors are left-handed: a vector and its negative "
-                "give the same lattice, so flip the sign of one of them.")
-    off_axes = np.array([box[0, 1], box[0, 2], box[1, 2]])
-    if np.all(np.diag(box) > 0) and \
-            np.all(np.abs(off_axes) <= 1e-6 * lengths.max()):
-        # Lower triangular, but for round-off at most: a shift of the
-        # lattice may be all that is left to do.
-        steps = []
-        if np.any(off_axes):
-            steps.append("its a_y, a_z and b_z are round-off: set them to 0")
-        flat = box.copy()
-        flat[0, 1:] = flat[1, 2] = 0
-        if _box_refused(flat) is not None:
-            if _box_reduced(flat) is None:  # rounding at an exact half
-                return ("Its |b_x|, |c_x| or |c_y| lies on a limit that "
-                        "rounding cannot meet: move it just inside.")
-            steps.append("OpenMM's openmm.app.internal.unitcell."
-                         "reducePeriodicBoxVectors gives the same lattice in "
-                         "this form")
-        said = "; then ".join(steps)
-        return said[0].upper() + said[1:] + "."
-    return ("If these are the vectors as columns, give one per row; if "
-            "they are rows, rotate the box and the positions together so "
-            "that a lies along x and b in the xy plane.")
-
-
-def _box_reduced(box: np.ndarray) -> np.ndarray | None:
-    """The box OpenMM's helper reduces it to, if OpenMM then takes it."""
-    try:
-        from openmm import unit
-        from openmm.app.internal.unitcell import reducePeriodicBoxVectors
-
-        reduced = np.array(reducePeriodicBoxVectors(box)
-                           .value_in_unit(unit.nanometer))
-    except Exception:
-        return None
-    return reduced if _box_refused(reduced) is None else None
 
 
 def topology_digest(topology: Any) -> str:

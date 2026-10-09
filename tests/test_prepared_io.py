@@ -85,39 +85,88 @@ def test_a_system_in_memory_needs_no_box_given():
     with pytest.raises(InputError, match="not all finite"):
         from_objects(box.system, box.topology, box.positions,
                      [[side, 0, 0], [np.nan, side, 0], [0, 0, side]])
-    from openmm.app.internal.unitcell import reducePeriodicBoxVectors
+    from openmm import unit
+    from openmm.app.internal.unitcell import (computePeriodicBoxVectors,
+                                              reducePeriodicBoxVectors)
 
-    # Off OpenMM's reduced form only by a shift of the lattice (b_x over
-    # a_x/2; c_y over b_y/2, though under half of b's length): its helper
-    # puts it right, and the message says so.
+    def refused(wrong):
+        with pytest.raises(InputError, match="cannot be used") as error:
+            from_objects(box.system, box.topology, box.positions, wrong)
+        return str(error.value)
+
+    def taken(right):
+        return from_objects(box.system, box.topology, box.positions,
+                            np.asarray(right, float)).box
+
+    def same_lattice(old, new):
+        """new = M old with M whole numbers and |det M| = 1."""
+        m = np.asarray(new, float) @ np.linalg.inv(np.asarray(old, float))
+        assert np.allclose(m, np.round(m), atol=1e-6), m
+        assert abs(round(np.linalg.det(np.round(m)))) == 1
+
+    def nm(vectors):
+        return np.array(vectors.value_in_unit(unit.nanometer))
+
+    def into_limits(v):
+        """Values left just past a limit by rounding, moved just inside."""
+        v = np.array(v, float)
+        for i, j, k in ((1, 0, 0), (2, 0, 0), (2, 1, 1)):
+            limit = v[k, k] / 2
+            if abs(v[i, j]) > limit:
+                v[i, j] = np.copysign(np.nextafter(limit, 0), v[i, j])
+        return v
+
+    # Off the reduced form by a shift of the lattice (b_x over a_x/2; c_y
+    # over b_y/2, though under half of b's length): the rule and the way
+    # are said, and reducing gives the same lattice in OpenMM's form.
     for skewed in ([[side, 0, 0], [0.6 * side, side, 0], [0, 0, side]],
                    [[side, 0, 0], [0.4 * side, 0.6 * side, 0],
                     [0, 0.35 * side, side]]):
-        with pytest.raises(InputError, match=r"(?s)reduced form.*\|c_y\| at "
-                           r"most b_y/2.*reducePeriodicBoxVectors"):
-            from_objects(box.system, box.topology, box.positions, skewed)
-        assert from_objects(box.system, box.topology, box.positions,
-                            reducePeriodicBoxVectors(skewed)) is not None
-    # Each other way to be refused gets the remedy that fits, and none
-    # that does not.
-    from openmm import unit
-    from openmm.app.internal.unitcell import computePeriodicBoxVectors
-
-    octahedron = np.array(computePeriodicBoxVectors(
+        message = refused(skewed)
+        for said in ("|c_y| at most b_y/2", "give them as rows",
+                     "not a reflection", "flip a if a_x < 0",
+                     "whole multiples", "just past a limit"):
+            assert said in message, message
+        same_lattice(skewed, taken(nm(reducePeriodicBoxVectors(skewed))))
+    # A shift that reducing leaves just past a limit, moved inside.
+    dodecahedron = nm(computePeriodicBoxVectors(
+        2.2, 2.2, 2.2, 60 * unit.degrees, 60 * unit.degrees,
+        90 * unit.degrees))
+    a, b, c = dodecahedron
+    shifted = np.array([a, b + 2 * a, c - 3 * b + a])
+    reduced = nm(reducePeriodicBoxVectors(shifted))
+    refused(reduced)
+    same_lattice(dodecahedron, taken(into_limits(reduced)))
+    # Rotated (and negated): rotate back, flip, reduce.
+    angle = np.radians(30)
+    turn = np.array([[1, 0, 0], [0, np.cos(angle), -np.sin(angle)],
+                     [0, np.sin(angle), np.cos(angle)]])
+    for wrong in (dodecahedron @ turn.T, -dodecahedron):
+        refused(wrong)
+        q, r = np.linalg.qr(wrong.T)  # wrong = r.T q.T
+        if np.linalg.det(q) < 0:  # a rotation, not a reflection
+            q[:, 0], r[0] = -q[:, 0], -r[0]
+        lower = np.where(np.abs(r.T) < 1e-12 * side, 0.0, r.T)
+        lower *= np.sign(np.diag(lower))[:, None]
+        fixed = taken(into_limits(nm(reducePeriodicBoxVectors(lower))))
+        same_lattice(wrong @ q, fixed)
+    # Given as columns.
+    octahedron = nm(computePeriodicBoxVectors(
         side, side, side, 70.5288 * unit.degrees, 109.4712 * unit.degrees,
-        70.5288 * unit.degrees).value_in_unit(unit.nanometer))
-    cube = np.eye(3) * side
-    tilted = cube.copy()
-    tilted[0, 1] = 1e-17
-    for wrong, said in ((octahedron.T, "if these are the vectors as columns"),
-                        (-np.eye(3), "left-handed"),
-                        (np.diag([side, side, 0.0]), "span no volume"),
-                        (tilted, "round-off: set them to 0.")):
-        with pytest.raises(InputError, match="cannot be used") as error:
-            from_objects(box.system, box.topology, box.positions, wrong)
-        message = str(error.value)
-        assert said in message.lower(), message
-        assert "reducePeriodicBoxVectors" not in message, message
+        70.5288 * unit.degrees))
+    refused(octahedron.T)
+    taken(octahedron)
+    # No volume, however oriented: no remedy, as none can work.
+    flat = np.array([[10, 0, 0], [3, 10, 0], [6e-4, 8e-4, 0]]) @ turn.T
+    for wrong in (np.diag([side, side, 0.0]), flat):
+        assert refused(wrong) == (f"The box {np.asarray(wrong).tolist()} "
+                                  "cannot be used: its vectors span no "
+                                  "volume.")
+    # A huge skew is no lack of volume, and a thin box OpenMM takes is
+    # taken.
+    assert "OpenMM needs" in refused([[3, 0, 0], [3e9 + 0.3, 3.3, 0],
+                                      [0, 0, 2.7]])
+    taken([[1, 0, 0], [0.5, 1e-12, 0], [0, 0, 1]])
     # A System that is not periodic ignores a box, whatever numbers it
     # holds.
     well = testsystems.double_well()
