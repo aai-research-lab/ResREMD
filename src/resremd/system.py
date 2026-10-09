@@ -181,23 +181,76 @@ def checked(prepared: Prepared) -> Prepared:
             raise InputError(
                 f"The box is three vectors of three numbers, not an array of "
                 f"shape {box.shape}.", code="resremd.input.prepared")
-        problem = None if np.all(np.isfinite(box)) else "not all finite."
-        if problem is None:
-            import openmm
-
-            try:  # OpenMM's own rule: positive lengths, in reduced form
-                openmm.System().setDefaultPeriodicBoxVectors(
-                    *(openmm.Vec3(*map(float, row)) for row in box))
-            except Exception as exc:
-                problem = str(exc).strip()
-        if problem:
+        if not np.all(np.isfinite(box)):
+            raise InputError(f"The box {box.tolist()} is not all finite.",
+                             code="resremd.input.prepared")
+        refused = _box_refused(box)
+        if refused:
             raise InputError(
-                f"The box {box.tolist()} cannot be used: {problem} (OpenMM "
-                "takes a along x, b in the xy plane, and each vector's "
-                "components along the earlier axes at most half the "
-                "earlier vectors' lengths; computePeriodicBoxVectors gives "
-                "a box so.)", code="resremd.input.prepared")
+                f"The box {box.tolist()} cannot be used: {refused} OpenMM "
+                "takes a along x and b in the xy plane, with a_x, b_y and "
+                "c_z positive, |b_x| and |c_x| at most a_x/2, and |c_y| at "
+                f"most b_y/2. {_box_remedy(box)}",
+                code="resremd.input.prepared")
     return prepared
+
+
+def _box_refused(box: np.ndarray) -> str | None:
+    """Why OpenMM's own rule refuses a box (finite, 3x3), or None."""
+    import openmm
+
+    try:
+        openmm.System().setDefaultPeriodicBoxVectors(
+            *(openmm.Vec3(*map(float, row)) for row in box))
+    except Exception as exc:
+        return str(exc).strip()
+    return None
+
+
+def _box_remedy(box: np.ndarray) -> str:
+    """What would put a refused box right, as far as can be told from it."""
+    lengths = np.linalg.norm(box, axis=1)
+    volume = np.linalg.det(box)
+    if abs(volume) <= 1e-9 * np.prod(lengths):
+        return "Its vectors span no volume."
+    if volume < 0:
+        return ("Its vectors are left-handed: a vector and its negative "
+                "give the same lattice, so flip the sign of one of them.")
+    off_axes = np.array([box[0, 1], box[0, 2], box[1, 2]])
+    if np.all(np.diag(box) > 0) and \
+            np.all(np.abs(off_axes) <= 1e-6 * lengths.max()):
+        # Lower triangular, but for round-off at most: a shift of the
+        # lattice may be all that is left to do.
+        steps = []
+        if np.any(off_axes):
+            steps.append("its a_y, a_z and b_z are round-off: set them to 0")
+        flat = box.copy()
+        flat[0, 1:] = flat[1, 2] = 0
+        if _box_refused(flat) is not None:
+            if _box_reduced(flat) is None:  # rounding at an exact half
+                return ("Its |b_x|, |c_x| or |c_y| lies on a limit that "
+                        "rounding cannot meet: move it just inside.")
+            steps.append("OpenMM's openmm.app.internal.unitcell."
+                         "reducePeriodicBoxVectors gives the same lattice in "
+                         "this form")
+        said = "; then ".join(steps)
+        return said[0].upper() + said[1:] + "."
+    return ("If these are the vectors as columns, give one per row; if "
+            "they are rows, rotate the box and the positions together so "
+            "that a lies along x and b in the xy plane.")
+
+
+def _box_reduced(box: np.ndarray) -> np.ndarray | None:
+    """The box OpenMM's helper reduces it to, if OpenMM then takes it."""
+    try:
+        from openmm import unit
+        from openmm.app.internal.unitcell import reducePeriodicBoxVectors
+
+        reduced = np.array(reducePeriodicBoxVectors(box)
+                           .value_in_unit(unit.nanometer))
+    except Exception:
+        return None
+    return reduced if _box_refused(reduced) is None else None
 
 
 def topology_digest(topology: Any) -> str:

@@ -82,13 +82,44 @@ def test_a_system_in_memory_needs_no_box_given():
         from_objects(box.system, box.topology, box.positions,
                      [[1.0, 2.0], [3.0, 4.0]])
     side = box.box[0, 0]
-    for wrong in (-np.eye(3), [[side, 0, 0], [np.nan, side, 0],
-                               [0, 0, side]],
-                  # Not in OpenMM's reduced form.
-                  [[side, 0, 0], [0.6 * side, side, 0], [0, 0, side]]):
-        with pytest.raises(InputError, match="cannot be used"):
+    with pytest.raises(InputError, match="not all finite"):
+        from_objects(box.system, box.topology, box.positions,
+                     [[side, 0, 0], [np.nan, side, 0], [0, 0, side]])
+    from openmm.app.internal.unitcell import reducePeriodicBoxVectors
+
+    # Off OpenMM's reduced form only by a shift of the lattice (b_x over
+    # a_x/2; c_y over b_y/2, though under half of b's length): its helper
+    # puts it right, and the message says so.
+    for skewed in ([[side, 0, 0], [0.6 * side, side, 0], [0, 0, side]],
+                   [[side, 0, 0], [0.4 * side, 0.6 * side, 0],
+                    [0, 0.35 * side, side]]):
+        with pytest.raises(InputError, match=r"(?s)reduced form.*\|c_y\| at "
+                           r"most b_y/2.*reducePeriodicBoxVectors"):
+            from_objects(box.system, box.topology, box.positions, skewed)
+        assert from_objects(box.system, box.topology, box.positions,
+                            reducePeriodicBoxVectors(skewed)) is not None
+    # Each other way to be refused gets the remedy that fits, and none
+    # that does not.
+    from openmm import unit
+    from openmm.app.internal.unitcell import computePeriodicBoxVectors
+
+    octahedron = np.array(computePeriodicBoxVectors(
+        side, side, side, 70.5288 * unit.degrees, 109.4712 * unit.degrees,
+        70.5288 * unit.degrees).value_in_unit(unit.nanometer))
+    cube = np.eye(3) * side
+    tilted = cube.copy()
+    tilted[0, 1] = 1e-17
+    for wrong, said in ((octahedron.T, "if these are the vectors as columns"),
+                        (-np.eye(3), "left-handed"),
+                        (np.diag([side, side, 0.0]), "span no volume"),
+                        (tilted, "round-off: set them to 0.")):
+        with pytest.raises(InputError, match="cannot be used") as error:
             from_objects(box.system, box.topology, box.positions, wrong)
-    # A System that is not periodic ignores a box, whatever it is.
+        message = str(error.value)
+        assert said in message.lower(), message
+        assert "reducePeriodicBoxVectors" not in message, message
+    # A System that is not periodic ignores a box, whatever numbers it
+    # holds.
     well = testsystems.double_well()
     assert from_objects(well.system, well.topology, well.positions,
                         -np.eye(3)) is not None

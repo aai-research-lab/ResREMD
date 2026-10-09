@@ -287,7 +287,8 @@ class Broken(logging.Filter):
 
 if __name__ == "__main__":
     logging.basicConfig(filename="log.txt", level=logging.NOTSET,
-                        format="%(levelname)s %(relativeCreated)d "
+                        format="%(levelname)s %(created)f "
+                               "%(relativeCreated)f %(processName)s "
                                "%(message)s")
     # The caller's name for a level is the one shown.
     logging.addLevelName(logging.INFO, "NOTE")
@@ -321,12 +322,82 @@ if __name__ == "__main__":
     assert "a filter that fails" in done.stderr, done.stderr
     log = (tmp_path / "log.txt").read_text()
     assert log.count("1 contexts per device:") == 3, log
-    first = log.split("\n")[:3]
-    assert first[1].startswith("NOTE "), log
-    # Its time since logging began falls between the caller's lines.
-    times = [int(line.split()[1]) for line in first]
-    assert times[0] <= times[1] <= times[2], log
+    first = [line.split() for line in log.split("\n")
+             if line.endswith(" mark") or "contexts per device" in line][:3]
+    # The caller's level name; the timing process's own time and process,
+    # its time since logging began counted as the caller counts it.
+    assert first[1][0] == "NOTE", log
+    names = [line[3] for line in first]
+    assert names[0] == names[2] == "MainProcess", log
+    assert names[1].startswith("SpawnProcess"), log
+    start = [float(line[1]) * 1e3 - float(line[2]) for line in first]
+    assert max(start) - min(start) < 1.0, log
+    assert float(first[0][1]) <= float(first[1][1]) <= \
+        float(first[2][1]), log
     assert "resremd 1 contexts per device:" in log, log
+
+
+def test_a_relayed_record_keeps_its_own_time():
+    """Made five seconds before it arrives, it says so, in its time since
+    logging began too."""
+    import logging
+    import time
+
+    from resremd.throughput import _Forward, _relay
+
+    seen = []
+
+    class Keep(logging.Handler):
+        def emit(self, record):
+            seen.append(record)
+
+    log = logging.getLogger("resremd.test_relay")
+    log.addHandler(Keep())
+    log.setLevel(logging.INFO)
+    try:
+        made = time.time() - 5.0
+        fields = dict(name=log.name, levelno=logging.INFO, pathname="x.py",
+                      lineno=1, funcName="f", created=made, msecs=0.0,
+                      thread=1, threadName="t", process=1, processName="p",
+                      taskName=None)
+        assert set(fields) == set(_Forward.FIELDS)
+        _relay(dict(fields, msg="five seconds ago"))
+        log.info("now")
+    finally:
+        log.handlers.clear()
+        log.setLevel(logging.NOTSET)
+    relayed, now = seen
+    assert relayed.created == made
+    # The same start of logging, counted back from each record's own time.
+    assert abs((relayed.created * 1e3 - relayed.relativeCreated)
+               - (now.created * 1e3 - now.relativeCreated)) < 1.0
+
+
+def test_a_record_that_cannot_be_formatted_still_arrives(tmp_path):
+    """Its text, as far as it goes, rather than nothing."""
+    done = _script(tmp_path, """
+import logging
+
+from resremd import testsystems
+from resremd.throughput import measure
+
+class Spoil(logging.Filter):
+    def filter(self, record):
+        record.msg, record.args = "%d %d", ("x",)
+        return True
+
+if __name__ == "__mp_main__":  # in the timing process only
+    logging.getLogger("resremd").addFilter(Spoil())
+if __name__ == "__main__":
+    logging.basicConfig(filename="log.txt", level=logging.INFO)
+    rows = measure(testsystems.lj_box(), n_replicas=2,
+                   contexts_per_device=[1], steps=10, cycles=1,
+                   platform="Reference", isolate=True)
+    print("rows", [r.get("error", "ok") for r in rows])
+""")
+    assert "rows ['ok']" in done.stdout, done.stderr
+    assert "unformattable log record: '%d %d' ('x',)" in \
+        (tmp_path / "log.txt").read_text()
 
 
 def test_a_system_in_memory_is_given_whole():
