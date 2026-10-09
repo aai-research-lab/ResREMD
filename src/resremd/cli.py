@@ -22,7 +22,7 @@ from typing import Any, Callable
 
 from . import __version__
 from .errors import ResRemdError
-from .options import CLUSTER, GENERATE, IMPORT, RUN, Option, Schema
+from .options import CLUSTER, GENERATE, IMPORT, PLATFORM, RUN, Option, Schema
 
 logger = logging.getLogger("resremd")
 
@@ -141,6 +141,18 @@ def _count(least: int) -> Callable[[str], int]:
 _positive = _count(1)
 
 
+def _above_zero(text: str) -> float:
+    import math
+
+    try:
+        value = float(text)
+    except ValueError:
+        value = math.nan
+    if not math.isfinite(value) or value <= 0:
+        raise argparse.ArgumentTypeError(f"{text} is not a number above 0")
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="resremd",
@@ -211,8 +223,9 @@ def build_parser() -> argparse.ArgumentParser:
                        help="MD steps per cycle, the exchange interval "
                             "(default 500).")
     p_thr.add_argument("--cycles", type=_positive, default=10)
-    p_thr.add_argument("--timestep-fs", type=float, default=2.0)
-    p_thr.add_argument("--platform", default="auto")
+    p_thr.add_argument("--timestep-fs", type=_above_zero, default=2.0)
+    p_thr.add_argument("--platform", default="auto",
+                       choices=PLATFORM.choices)
     p_thr.add_argument("--precision", default="mixed",
                        choices=("mixed", "single", "double"))
     p_thr.add_argument("--devices", type=int, nargs="+", metavar="INDEX")
@@ -271,7 +284,7 @@ def main(argv: list[str] | None = None) -> int:
                            rest2_selection=args.rest2_selection,
                            ensemble=args.ensemble, isolate=True)
             print(json.dumps(rows, indent=2) if args.json
-                  else format_rows(rows, args.n_replicas))
+                  else format_rows(rows, args.n_replicas, args.platform))
             if all("error" in r for r in rows):
                 return 2
         elif args.command == "ladder":

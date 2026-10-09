@@ -42,23 +42,36 @@ def measure(prepared: Any, *, contexts_per_device: list[int] | None = None,
     input. Called from the main thread, a SIGTERM that would end this
     process first stops the timing process (from another thread, the timing
     process ends soon after this one); a SIGTERM handler of the caller's own
-    is left to decide. Other settings are those of :func:`_measure`.
+    is left to decide. The other settings, with their defaults, are
+    ``n_replicas=8``, ``steps=500`` (per cycle), ``cycles=10``,
+    ``timestep_fs=2.0``, ``temperature_K=300.0``, ``platform="auto"``,
+    ``precision="mixed"``, ``devices``, ``cpu_threads``, ``rest2=False``,
+    ``rest2_selection="solute"``, ``ensemble`` (as for a run) and
+    ``random_seed=1``.
     """
     import inspect
+    import math
     import numbers
 
     from .errors import InputError
+    from .options import (CPU_THREADS, DEVICES, ENSEMBLE, PLATFORM,
+                          PRECISION, RANDOM_SEED, REST2, REST2_SELECTION,
+                          _check_one)
     from .system import from_objects, load_prepared, select_atoms
 
     if isolate:
         _check_isolatable()
 
-    def whole(name: str, value: Any, least: int) -> int:
+    def whole(name: str, value: Any, least: int,
+              most: int = 2**31 - 1) -> int:
         if not isinstance(value, numbers.Integral) or isinstance(value, bool):
             raise InputError(f"{name} takes whole numbers, not {value!r}.",
                              code="resremd.input.type")
         if value < least:
             raise InputError(f"{name} takes counts of at least {least}, not "
+                             f"{value}.", code="resremd.input.range")
+        if value > most:  # what OpenMM takes as a number of steps
+            raise InputError(f"{name} takes counts of at most {most}, not "
                              f"{value}.", code="resremd.input.range")
         return int(value)
 
@@ -72,20 +85,47 @@ def measure(prepared: Any, *, contexts_per_device: list[int] | None = None,
         raise InputError("contexts_per_device names no count to time.",
                          code="resremd.input.range")
     counts = [whole("contexts_per_device", c, 1) for c in counts]
-    # The names of the settings, their counts and the solute are checked
-    # here once rather than failing in every process.
+    # The settings and the solute are checked here once rather than
+    # failing in every process (whether the platform is there is found as
+    # each process starts on it), the words as for a run.
+    names = set(inspect.signature(_measure).parameters) - {"prepared",
+                                                            "counts"}
+    unknown = sorted(set(settings) - names)
+    if unknown:
+        raise TypeError(f"measure() got unexpected settings: "
+                        f"{', '.join(unknown)}")
     bound = inspect.signature(_measure).bind(None, counts, **settings)
     bound.apply_defaults()
     for name, least in (("n_replicas", 2), ("steps", 1), ("cycles", 1)):
         settings[name] = whole(name, bound.arguments[name], least)
+    for name in ("timestep_fs", "temperature_K"):
+        value = bound.arguments[name]
+        if not isinstance(value, numbers.Real) or isinstance(value, bool) \
+                or not math.isfinite(value) or value <= 0:
+            raise InputError(f"{name} takes a number above 0, not "
+                             f"{value!r}.", code="resremd.input.range")
+        settings[name] = float(value)
+    for option in (ENSEMBLE, PLATFORM, PRECISION, CPU_THREADS, DEVICES,
+                   REST2, REST2_SELECTION, RANDOM_SEED):
+        value = bound.arguments[option.name]
+        if isinstance(value, numbers.Integral) and \
+                not isinstance(value, bool):
+            value = int(value)  # a numpy integer, say
+        settings[option.name] = _check_one(option, value)
     source = prepared
     if isinstance(prepared, (str, Path)):
         prepared = load_prepared(prepared)
     elif not hasattr(prepared, "system"):
-        prepared = source = from_objects(*prepared)
-    if settings.get("rest2"):
-        select_atoms(prepared.topology,
-                     settings.get("rest2_selection", "solute"), option="rest2")
+        try:
+            prepared = source = from_objects(*prepared)
+        except TypeError:
+            raise InputError(
+                "measure() times a prepared directory, a Prepared system or "
+                f"(system, topology, positions, box), not {prepared!r:.80}.",
+                code="resremd.input.type") from None
+    if bound.arguments["rest2"]:
+        select_atoms(prepared.topology, bound.arguments["rest2_selection"],
+                     option="rest2")
     if not isolate:
         return _measure(prepared, counts, **settings)
     return _stoppable(source, counts, settings)
@@ -102,11 +142,11 @@ def _check_isolatable() -> None:
     # The flag multiprocessing itself checks: a script without a main guard
     # is being run again, as the main module of a new process.
     if getattr(process, "_inheriting", False):
-        raise InputError(
+        # Said once by this process, without a traceback, which ends it.
+        raise SystemExit(
             "measure(isolate=True) ran again inside a timing process as it "
             "started: the script calling it needs an "
-            "`if __name__ == \"__main__\":` guard.",
-            code="resremd.input.isolate")
+            "`if __name__ == \"__main__\":` guard.")
     if process.daemon:
         raise InputError(
             "measure(isolate=True) cannot start timing processes from a "
@@ -176,6 +216,7 @@ def _stoppable(source: Any, counts: list[int],
 def _isolated(spawn: Any, source: Any, counts: list[int],
               settings: dict[str, Any],
               state: dict[str, Any]) -> list[dict[str, Any]]:
+    import contextlib
     import pickle
     import tempfile
 
@@ -183,24 +224,40 @@ def _isolated(spawn: Any, source: Any, counts: list[int],
         if state.get("signal") is not None:
             raise _Stopped
 
-    # Each process reads what it times (a directory to read again, or a
-    # System pickled as XML) from a temporary file that has no name, so
-    # that nothing is left behind however this process ends. Sent through
-    # a pipe instead, a large System would wait on the process importing
-    # the calling script.
-    with tempfile.TemporaryFile() as handoff:
-        try:
-            pickle.dump(source, handoff)
-            handoff.flush()
-        except pickle.PicklingError as exc:
-            return [_not_started(count, exc) for count in counts]
-        except OSError as exc:
-            return [_not_started(count, OSError(
-                f"the System could not be written to a temporary file "
-                f"(the directory is set by TMPDIR): {exc}"))
+    if isinstance(source, (str, Path)):  # each process reads it again
+        return [_one(spawn, str(source), count, settings, check)
                 for count in counts]
-        except Exception as exc:  # a System that cannot be sent
-            return [_not_started(count, exc) for count in counts]
+    def not_written(where: str | None, exc: Exception) -> list[dict]:
+        problem = OSError(
+            "the System could not be written to a temporary file"
+            + (f" in {where}" if where else "")
+            + f" (TMPDIR sets the directory; or no file descriptor was "
+            f"free): {exc}")
+        return [_not_started(count, problem) for count in counts]
+
+    # An in-memory System goes to each process, pickled as XML, in a
+    # temporary file unlinked as it is made (usually never named at all),
+    # so that nothing is left behind however this process ends. Sent
+    # through a pipe instead, a large System would wait on the process
+    # importing the calling script.
+    where = None
+    try:
+        where = tempfile.gettempdir()
+        handoff = tempfile.TemporaryFile(dir=where)
+    except OSError as exc:
+        return not_written(where, exc)
+    try:
+        pickle.dump(source, handoff)
+        handoff.flush()
+    except Exception as exc:
+        # Closing tries a failed write again.
+        with contextlib.suppress(OSError):
+            handoff.close()
+        if isinstance(exc, OSError):
+            return not_written(where, exc)
+        return [_not_started(count, exc)  # a System that cannot be sent
+                for count in counts]
+    with handoff:
         return [_one(spawn, _Handoff(handoff.fileno()), count, settings,
                      check) for count in counts]
 
@@ -235,7 +292,10 @@ def _one(spawn: Any, handoff: Any, count: int, settings: dict[str, Any],
     import signal
 
     poll = 0.25  # seconds between looks at a noted signal
-    results, reporter = spawn.Pipe(duplex=False)
+    try:
+        results, reporter = spawn.Pipe(duplex=False)
+    except OSError as exc:  # out of descriptors, say
+        return _not_started(count, exc)
     worker = spawn.Process(target=_worker,
                            args=(reporter, handoff, count, settings),
                            daemon=True)
@@ -243,8 +303,8 @@ def _one(spawn: Any, handoff: Any, count: int, settings: dict[str, Any],
     hung = False
     try:
         try:
-            # Here, not before the pipe: setting up this count let the last
-            # one's finalizers run, and a signal may have come during one.
+            # Here, not earlier: setting up this count let the last one's
+            # finalizers run, and a signal may have come during one.
             check()
             worker.start()
         except Exception as exc:
@@ -335,11 +395,15 @@ def _worker(channel: Any, handoff: Any, count: int,
         # Nor may it outlive a parent that was killed outright (from here
         # on: while it still imports the calling script, it cannot tell).
         threading.Thread(target=orphaned, daemon=True).start()
-    logging.basicConfig(level=logging.WARNING)
+    logging.basicConfig(level=logging.WARNING,
+                        format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
     try:
-        with handoff:
-            handoff.seek(0)  # shared with the processes before this one
-            prepared = pickle.load(handoff)
+        if isinstance(handoff, str):  # a prepared directory
+            prepared = handoff
+        else:
+            with handoff:
+                handoff.seek(0)  # shared with the processes before this one
+                prepared = pickle.load(handoff)
         row = _measure(prepared, [count], **settings)[0]
         row["pid"] = os.getpid()
         channel.send(("ok", row))
@@ -361,13 +425,11 @@ def _measure(prepared: Any, counts: list[int], *, n_replicas: int = 8,
     out, the prepared System decides (its barostat, if it has one)."""
     from .engine import Engine, Replica
     from .ladder import geometric
-    from .system import from_objects, load_prepared, select_atoms
+    from .system import load_prepared, select_atoms
     from .thermo import simulated_system
 
-    if isinstance(prepared, (str, Path)):
+    if isinstance(prepared, (str, Path)):  # a process reading a directory
         prepared = load_prepared(prepared)
-    elif not hasattr(prepared, "system"):
-        prepared = from_objects(*prepared)
     system = prepared.system
     scales = None
     if rest2:
@@ -443,8 +505,12 @@ def _measure(prepared: Any, counts: list[int], *, n_replicas: int = 8,
     return rows
 
 
-def format_rows(rows: list[dict[str, Any]], n_replicas: int) -> str:
-    platform = next((r["platform"] for r in rows if "platform" in r), "?")
+def format_rows(rows: list[dict[str, Any]], n_replicas: int,
+                platform: str = "?") -> str:
+    """The rows as a table; ``platform`` names the one asked for, for a
+    table in which no count ran."""
+    platform = next((r["platform"] for r in rows if "platform" in r),
+                    platform)
     lines = [f"{n_replicas} replicas on {platform}",
              "contexts/device  contexts  ns/day/replica  ns/day total  "
              "overhead"]
@@ -463,7 +529,12 @@ def format_rows(rows: list[dict[str, Any]], n_replicas: int) -> str:
                         if r.get("exit_code") else ""))
     if not done:
         return "\n".join(lines)
-    best = max(done, key=lambda r: r["ns_per_day_total"])
+    # Counts that came to the same number of contexts (more than the
+    # replicas need) ran alike: the smallest of them stands for them.
+    alike: dict[int, dict[str, Any]] = {}
+    for r in sorted(done, key=lambda r: r["contexts_per_device"]):
+        alike.setdefault(r["contexts"], r)
+    best = max(alike.values(), key=lambda r: r["ns_per_day_total"])
     lines.append(f"fastest: contexts_per_device: "
                  f"{best['contexts_per_device']}")
     return "\n".join(lines)

@@ -82,21 +82,29 @@ def test_a_failing_count_is_recorded_and_the_others_reported(tmp_path,
                                                              capsys):
     """A count that fails in its process becomes a row saying why; a table
     in which every count failed makes the command fail."""
+    import openmm
+
     from resremd.throughput import format_rows
 
+    # A platform this OpenMM may have but does not here.
+    missing = next(name for name in ("HIP", "OpenCL", "CUDA")
+                   if name not in {openmm.Platform.getPlatform(i).getName()
+                                   for i in range(
+                                       openmm.Platform.getNumPlatforms())})
     rows = measure(testsystems.lj_box(), n_replicas=2,
                    contexts_per_device=[1, 2], steps=10, cycles=1,
-                   platform="NoSuchPlatform", isolate=True)
-    assert len(rows) == 2 and all("NoSuchPlatform" in r["error"]
+                   platform=missing, isolate=True)
+    assert len(rows) == 2 and all(f"no {missing} platform" in r["error"]
                                   for r in rows)
     assert "failed" in format_rows(rows, 2)
+    assert f"on {missing}" in format_rows(rows, 2, missing)
     p = testsystems.lj_box()
     write_prepared(tmp_path / "setup", p.system, p.topology, p.positions,
                    p.box)
     assert main(["-q", "throughput", "--prepared", str(tmp_path / "setup"),
                  "--n-replicas", "2", "--contexts-per-device", "1",
                  "--steps", "10", "--cycles", "1",
-                 "--platform", "NoSuchPlatform"]) == 2
+                 "--platform", missing]) == 2
 
 
 def test_settings_are_checked_before_any_process_starts():
@@ -124,7 +132,10 @@ def test_counts_must_be_whole_numbers(capsys):
     for name, value, match in (("n_replicas", 1, "at least 2, not 1"),
                                ("steps", 0, "at least 1, not 0"),
                                ("steps", -5, "at least 1, not -5"),
-                               ("cycles", 2.0, "whole numbers, not 2.0")):
+                               ("cycles", 2.0, "whole numbers, not 2.0"),
+                               ("timestep_fs", 0, "above 0, not 0"),
+                               ("timestep_fs", float("nan"), "not nan"),
+                               ("temperature_K", -1.0, "not -1.0")):
         with pytest.raises(InputError, match=f"{name} takes .*{match}"):
             measure(testsystems.lj_box(), **{name: value})
     rows = measure(testsystems.lj_box(), n_replicas=np.int64(2),
@@ -135,10 +146,50 @@ def test_counts_must_be_whole_numbers(capsys):
             ("--contexts-per-device", "x", "x is not a whole number"),
             ("--n-replicas", "1", "1 is not a count of at least 2"),
             ("--steps", "-5", "-5 is not a count of at least 1"),
-            ("--cycles", "0", "0 is not a count of at least 1")):
+            ("--cycles", "0", "0 is not a count of at least 1"),
+            ("--timestep-fs", "nan", "nan is not a number above 0"),
+            ("--timestep-fs", "0", "0 is not a number above 0")):
         with pytest.raises(SystemExit):
             main(["throughput", "--prepared", "x", option, value])
         assert said in capsys.readouterr().err
+
+
+def test_settings_are_checked_as_for_a_run():
+    import numpy as np
+    import openmm
+
+    from resremd.errors import InputError
+
+    box = testsystems.lj_box()
+    for setting, match in ((dict(ensemble="NVT"), "ensemble"),
+                           (dict(rest2_selection="bogus"), "rest2_selection"),
+                           (dict(rest2="no"), "rest2"),
+                           (dict(precision="quad"), "precision"),
+                           (dict(cpu_threads=-3), "cpu_threads"),
+                           (dict(random_seed=-1), "random_seed"),
+                           (dict(platform="reference"), "platform"),
+                           (dict(steps=2**31), "at most")):
+        with pytest.raises(InputError, match=match):
+            measure(box, **setting)
+    with pytest.raises(TypeError, match="unexpected settings: counts"):
+        measure(box, counts=[1])
+    with pytest.raises(InputError, match="a Prepared system"):
+        measure(openmm.System())
+    # Numbers of numpy's own kinds come back as plain ones.
+    rows = measure(box, n_replicas=2, contexts_per_device=[1], steps=10,
+                   cycles=1, timestep_fs=np.float32(2.0),
+                   platform="Reference")
+    json.dumps(rows)
+
+
+def test_counts_that_ran_alike_are_not_told_apart():
+    from resremd.throughput import format_rows
+
+    row = dict(platform="CPU", replicas_resident=True, overhead_fraction=0.1,
+               ns_per_day_per_replica=1.0)
+    rows = [dict(row, contexts_per_device=c, contexts=n, ns_per_day_total=t)
+            for c, n, t in ((1, 1, 10.0), (2, 2, 20.0), (4, 2, 21.0))]
+    assert format_rows(rows, 2).endswith("fastest: contexts_per_device: 2")
 
 
 def _script(tmp_path, text, *, stdin=False):
@@ -208,6 +259,7 @@ print('rows', time_it(n_side=10))
     assert done.returncode == 0, done.stderr
     assert done.stdout.count("rows") == 1
     assert "ran again inside a timing process" in done.stderr
+    assert "Traceback" not in done.stderr, done.stderr
     assert "__main__" in done.stdout.split("rows", 1)[1]
 
 
@@ -285,6 +337,40 @@ if __name__ == "__main__":
 """)
     assert done.returncode == 1
     assert done.stderr == ""
+
+
+def test_a_full_temporary_directory_gives_rows_saying_so(tmp_path):
+    """With nowhere to write an in-memory System, each count says so and
+    the script goes on; a directory needs no temporary file at all."""
+    done = _script(tmp_path, """
+import resource
+
+from resremd import testsystems
+from resremd.system import write_prepared
+from resremd.throughput import measure
+
+if __name__ == "__main__":
+    box = testsystems.lj_box()
+    write_prepared("setup", box.system, box.topology, box.positions,
+                   box.box)
+    hard = resource.getrlimit(resource.RLIMIT_FSIZE)[1]
+    # Files written from here on stop at none, so that no temporary
+    # directory is usable at all, and then at 10 bytes, as on a nearly
+    # full disk.
+    for limit, source in ((0, box), (10, "setup"), (10, box)):
+        resource.setrlimit(resource.RLIMIT_FSIZE, (limit, hard))
+        rows = measure(source, n_replicas=2, contexts_per_device=[1, 2],
+                       steps=10, cycles=1, platform="Reference",
+                       isolate=True)
+        print("rows", [r.get("error", "ok") for r in rows])
+""")
+    assert done.returncode == 0, done.stderr
+    lines = [line for line in done.stdout.split("\n")
+             if line.startswith("rows")]
+    assert lines[1] == "rows ['ok', 'ok']", done.stderr
+    assert len(lines) == 3 and all(
+        line.count("could not be written to a temporary file") == 2
+        for line in (lines[0], lines[2])), done.stdout
 
 
 def test_a_count_that_cannot_start_is_recorded(monkeypatch):
@@ -554,6 +640,9 @@ def test_a_stopped_script_leaves_no_timing_process(tmp_path, how):
         if script.poll() is None:
             os.killpg(script.pid, signal.SIGKILL)
             script.wait()
-        for pid in launched():
-            if _alive(pid):
-                os.kill(pid, signal.SIGKILL)
+        # What is left of the script's own processes (its process group,
+        # so that a number used again by another process is not touched).
+        try:
+            os.killpg(script.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass

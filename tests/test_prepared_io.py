@@ -40,3 +40,19 @@ def test_proline_dipeptide_trans_and_cis():
         zeta = np.degrees(md.compute_dihedrals(
             t, [[idx["CA"], idx["N"], idx["C"], idx["CB"]]]))[0, 0]
         assert 25 < zeta < 45
+
+
+def test_a_damaged_prepared_directory_is_named(tmp_path):
+    from resremd.errors import InputError
+
+    box = testsystems.lj_box()
+    write_prepared(tmp_path, box.system, box.topology, box.positions,
+                   box.box)
+    system = (tmp_path / "system.xml").read_text()
+    (tmp_path / "system.xml").write_text(system[:200])
+    with pytest.raises(InputError, match="system.xml could not be read"):
+        load_prepared(tmp_path)
+    (tmp_path / "system.xml").write_text(
+        (tmp_path / "state.xml").read_text())
+    with pytest.raises(InputError, match="holds a State, not a System"):
+        load_prepared(tmp_path)

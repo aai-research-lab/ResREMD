@@ -61,9 +61,27 @@ def load_prepared(directory: str | Path) -> Prepared:
             f"{directory} is not a prepared system: {', '.join(missing)} "
             "missing. It needs system.xml, state.xml and topology.pdb.",
             code="resremd.input.prepared")
-    system = openmm.XmlSerializer.deserialize(files["system.xml"].read_text())
-    state = openmm.XmlSerializer.deserialize(files["state.xml"].read_text())
-    topology = app.PDBFile(str(files["topology.pdb"])).topology
+    def read(name: str, how: Any) -> Any:
+        try:
+            return how(files[name])
+        except Exception as exc:  # OpenMM's errors are no subclass of one
+            raise InputError(
+                f"{files[name]} could not be read ({type(exc).__name__}: "
+                f"{exc}). Prepare the system again.",
+                code="resremd.input.prepared") from exc
+
+    system = read("system.xml", lambda f: openmm.XmlSerializer.deserialize(
+        f.read_text()))
+    state = read("state.xml", lambda f: openmm.XmlSerializer.deserialize(
+        f.read_text()))
+    topology = read("topology.pdb", lambda f: app.PDBFile(str(f)).topology)
+    for name, value, kind in (("system.xml", system, openmm.System),
+                              ("state.xml", state, openmm.State)):
+        if not isinstance(value, kind):
+            raise InputError(
+                f"{files[name]} holds a {type(value).__name__}, not a "
+                f"{kind.__name__}. Prepare the system again.",
+                code="resremd.input.prepared")
     positions = np.asarray(
         state.getPositions(asNumpy=True).value_in_unit(unit.nanometer),
         dtype=float)
