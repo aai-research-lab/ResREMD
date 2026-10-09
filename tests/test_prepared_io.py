@@ -70,9 +70,25 @@ def test_a_damaged_prepared_directory_is_named(tmp_path):
 
 
 def test_a_system_in_memory_needs_no_box_given():
-    """A periodic System's own box stands in, as OpenMM gives it."""
+    """A periodic System's own box stands in, as OpenMM gives it; one given
+    must be a box."""
+    from resremd.errors import InputError
     from resremd.system import from_objects
 
     box = testsystems.lj_box()
     prepared = from_objects(box.system, box.topology, box.positions)
     assert np.allclose(prepared.box, box.box)
+    with pytest.raises(InputError, match="The box is three vectors"):
+        from_objects(box.system, box.topology, box.positions,
+                     [[1.0, 2.0], [3.0, 4.0]])
+    side = box.box[0, 0]
+    for wrong in (-np.eye(3), [[side, 0, 0], [np.nan, side, 0],
+                               [0, 0, side]],
+                  # Not in OpenMM's reduced form.
+                  [[side, 0, 0], [0.6 * side, side, 0], [0, 0, side]]):
+        with pytest.raises(InputError, match="cannot be used"):
+            from_objects(box.system, box.topology, box.positions, wrong)
+    # A System that is not periodic ignores a box, whatever it is.
+    well = testsystems.double_well()
+    assert from_objects(well.system, well.topology, well.positions,
+                        -np.eye(3)) is not None

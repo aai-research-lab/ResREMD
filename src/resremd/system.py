@@ -174,6 +174,29 @@ def checked(prepared: Prepared) -> Prepared:
     if not np.all(np.isfinite(prepared.positions)):
         raise InputError("The starting positions are not all finite.",
                          code="resremd.input.prepared")
+    box = prepared.box
+    # A box matters only to a periodic System; any other ignores it.
+    if box is not None and prepared.system.usesPeriodicBoundaryConditions():
+        if box.shape != (3, 3):
+            raise InputError(
+                f"The box is three vectors of three numbers, not an array of "
+                f"shape {box.shape}.", code="resremd.input.prepared")
+        problem = None if np.all(np.isfinite(box)) else "not all finite."
+        if problem is None:
+            import openmm
+
+            try:  # OpenMM's own rule: positive lengths, in reduced form
+                openmm.System().setDefaultPeriodicBoxVectors(
+                    *(openmm.Vec3(*map(float, row)) for row in box))
+            except Exception as exc:
+                problem = str(exc).strip()
+        if problem:
+            raise InputError(
+                f"The box {box.tolist()} cannot be used: {problem} (OpenMM "
+                "takes a along x, b in the xy plane, and each vector's "
+                "components along the earlier axes at most half the "
+                "earlier vectors' lengths; computePeriodicBoxVectors gives "
+                "a box so.)", code="resremd.input.prepared")
     return prepared
 
 

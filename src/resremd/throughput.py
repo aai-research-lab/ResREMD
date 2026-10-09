@@ -326,12 +326,7 @@ def _one(spawn: Any, handoff: Any, count: int, settings: dict[str, Any],
                 except (EOFError, OSError):  # ended without reporting
                     break
                 if message[0] == "log":
-                    # The process's own log, through the caller's logging,
-                    # as far as the caller logs now.
-                    record = logging.makeLogRecord(message[1])
-                    log = logging.getLogger(record.name)
-                    if log.isEnabledFor(record.levelno):
-                        log.handle(record)
+                    _relay(message[1])
                 else:
                     result = message
         # A process stuck in teardown after reporting is waited on for
@@ -413,7 +408,8 @@ def _worker(channel: Any, handoff: Any, count: int,
             channel.send(message)
 
     log = logging.getLogger("resremd")
-    log.setLevel(level)
+    # NOTSET here would defer to this process's root logger (WARNING).
+    log.setLevel(max(level, 1))
     log.propagate = False
     # Only this: handlers the script set up as it was imported again here
     # would write what the caller writes too.
@@ -443,25 +439,64 @@ class _Forward(logging.Handler):
         self.send = send
 
     # What the caller needs to place and show a record; plain values, so
-    # that nothing the record carried can fail to arrive.
-    FIELDS = ("name", "levelno", "levelname", "pathname", "filename",
-              "module", "lineno", "funcName", "created", "msecs",
-              "relativeCreated", "thread", "threadName", "process",
-              "processName")
+    # that nothing the record carried can fail to arrive. What follows from
+    # these (the level's name, the file's) the caller derives itself.
+    FIELDS = ("name", "levelno", "pathname", "lineno", "funcName",
+              "created", "msecs", "thread", "threadName", "process",
+              "processName", "taskName")
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
-            # The message with any traceback, as a handler would show it.
-            message = logging.Formatter("%(message)s").format(record)
+            try:
+                # The message with any traceback, as a handler shows it.
+                message = logging.Formatter("%(message)s").format(record)
+            except Exception:
+                message = "unformattable log record: " \
+                    f"{record.msg!r:.200} {record.args!r:.200}"
+            fields = {k: getattr(record, k, None) for k in self.FIELDS}
+            fields["msg"] = message
         except Exception:
-            message = f"unformattable log record: {record.msg!r} " \
-                      f"{record.args!r}"
-        fields = {k: getattr(record, k, None) for k in self.FIELDS}
-        fields.update(msg=message, args=None)
+            self.handleError(record)
+            return
         try:
             self.send(("log", fields))
         except Exception:  # nobody left to tell
             pass
+
+
+def _relay(fields: dict[str, Any]) -> None:
+    """A timing process's record, through the caller's logging as far as
+    the caller logs now. Nothing the caller's logging does with it can
+    cost the timing; what goes wrong is said, as logging says it."""
+    import sys
+    import traceback
+
+    try:
+        log = logging.getLogger(fields["name"])
+        if not log.isEnabledFor(fields["levelno"]):
+            return
+        # As Logger.makeRecord calls a factory.
+        record = logging.getLogRecordFactory()(
+            fields["name"], fields["levelno"], fields["pathname"],
+            fields["lineno"], fields["msg"], None, None, fields["funcName"],
+            None)
+        # (A factory of the caller's sees the caller's process, and this
+        # moment.) Its time since logging began, from when it was made.
+        record.relativeCreated += (fields["created"] - record.created) * 1e3
+        for k in ("created", "msecs", "thread", "threadName", "process",
+                  "processName"):
+            setattr(record, k, fields[k])
+        if hasattr(record, "taskName"):  # Python 3.12 on
+            record.taskName = fields.get("taskName")
+        log.handle(record)
+    except Exception:
+        if logging.raiseExceptions:
+            try:
+                sys.stderr.write("--- Logging error, relaying a timing "
+                                 "process's record ---\n")
+                traceback.print_exc(file=sys.stderr)
+            except Exception:
+                pass
 
 
 def _measure(prepared: Any, counts: list[int], *, n_replicas: int = 8,

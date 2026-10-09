@@ -681,10 +681,13 @@ def device_indices(devices: Any) -> list[int] | None:
         return None
     items = list(devices) if isinstance(devices, (list, tuple)) else [None]
     if not all(isinstance(d, numbers.Integral) and not isinstance(d, bool)
-               and d >= 0 for d in items):
-        raise InputError(f"`devices` must be GPU indices, whole numbers of "
-                         f"at least 0; got {devices!r}.",
+               for d in items):
+        raise InputError(f"`devices` must be a list (or tuple) of GPU "
+                         f"indices, whole numbers; got {devices!r}.",
                          code="resremd.input.type")
+    if any(d < 0 for d in items):
+        raise InputError(f"GPU indices in `devices` are at least 0; got "
+                         f"{devices!r}.", code="resremd.input.range")
     return [int(d) for d in items]
 
 

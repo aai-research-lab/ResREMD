@@ -193,13 +193,17 @@ def test_devices_are_checked_as_for_a_run(tmp_path):
     small = dict(n_replicas=2, contexts_per_device=[1], steps=10, cycles=1,
                  platform="Reference")
     for devices in (["a"], [1.7], [-1], [True], ["0"]):
-        with pytest.raises(InputError, match="GPU indices"):
+        code = "resremd.input.range" if devices == [-1] \
+            else "resremd.input.type"
+        with pytest.raises(InputError, match="GPU indices") as error:
             measure(testsystems.lj_box(), devices=devices, **small)
-        with pytest.raises(InputError, match="GPU indices"):
+        assert error.value.code == code
+        with pytest.raises(InputError, match="GPU indices") as error:
             resremd.run(testsystems.lj_box(), output=str(tmp_path / "run"),
                         temperatures_K=[100.0, 120.0], production_steps=10,
                         exchange_interval_steps=10, platform="Reference",
                         devices=devices)
+        assert error.value.code == code
     rows = measure(testsystems.lj_box(), n_replicas=2,
                    contexts_per_device=[1], steps=10, cycles=1,
                    platform="Reference", devices=[np.int64(0)])
@@ -259,6 +263,70 @@ if __name__ == "__main__":
     assert log.count("1 contexts per device:") == 1, log
     assert "2 contexts per device:" not in log, log
     assert log.count("`devices` is ignored") == 2, log
+
+
+def test_a_callers_unusual_logging_neither_loses_nor_stops_anything(
+        tmp_path):
+    """Logging everything (NOTSET), a record factory of its own, a filter
+    that fails: the timing goes on, and its lines arrive."""
+    done = _script(tmp_path, """
+import logging
+
+from resremd import testsystems
+from resremd.throughput import measure
+
+def time_it():
+    rows = measure(testsystems.lj_box(), n_replicas=2,
+                   contexts_per_device=[1], steps=10, cycles=1,
+                   platform="Reference", isolate=True)
+    print("rows", [r.get("error", "ok") for r in rows])
+
+class Broken(logging.Filter):
+    def filter(self, record):
+        raise RuntimeError("a filter that fails")
+
+if __name__ == "__main__":
+    logging.basicConfig(filename="log.txt", level=logging.NOTSET,
+                        format="%(levelname)s %(relativeCreated)d "
+                               "%(message)s")
+    # The caller's name for a level is the one shown.
+    logging.addLevelName(logging.INFO, "NOTE")
+    logging.getLogger("before").warning("mark")
+    time_it()
+    logging.getLogger("after").warning("mark")
+    made = logging.getLogRecordFactory()
+
+    def factory(name, *args, **kwargs):
+        record = made(name, *args, **kwargs)
+        record.package = name.split(".")[0]
+        return record
+
+    logging.setLogRecordFactory(factory)
+    logging.getLogger().handlers[0].setFormatter(
+        logging.Formatter("%(package)s %(message)s"))
+    time_it()
+    # One that takes its arguments only as Logger.makeRecord gives them.
+    logging.setLogRecordFactory(lambda *fields: factory(*fields))
+    time_it()
+    logging.getLogger("resremd").addFilter(Broken())
+    time_it()
+    # Said only as logging would say it.
+    logging.raiseExceptions = False
+    time_it()
+""")
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.count("rows ['ok']") == 5, done.stdout + done.stderr
+    # The failing filter is said once, as logging says such things.
+    assert done.stderr.count("--- Logging error") == 1, done.stderr
+    assert "a filter that fails" in done.stderr, done.stderr
+    log = (tmp_path / "log.txt").read_text()
+    assert log.count("1 contexts per device:") == 3, log
+    first = log.split("\n")[:3]
+    assert first[1].startswith("NOTE "), log
+    # Its time since logging began falls between the caller's lines.
+    times = [int(line.split()[1]) for line in first]
+    assert times[0] <= times[1] <= times[2], log
+    assert "resremd 1 contexts per device:" in log, log
 
 
 def test_a_system_in_memory_is_given_whole():
