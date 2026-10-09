@@ -70,24 +70,31 @@ def test_a_damaged_prepared_directory_is_named(tmp_path):
 
 
 def test_a_system_in_memory_needs_no_box_given():
-    """A periodic System's own box stands in, as OpenMM gives it; one given
-    must be a box."""
-    from resremd.errors import InputError
+    """A periodic System's own box stands in, as OpenMM gives it; one that
+    is not periodic ignores a box, whatever numbers it holds."""
     from resremd.system import from_objects
 
     box = testsystems.lj_box()
     prepared = from_objects(box.system, box.topology, box.positions)
     assert np.allclose(prepared.box, box.box)
-    with pytest.raises(InputError, match="The box is three vectors"):
-        from_objects(box.system, box.topology, box.positions,
-                     [[1.0, 2.0], [3.0, 4.0]])
-    side = box.box[0, 0]
-    with pytest.raises(InputError, match="not all finite"):
-        from_objects(box.system, box.topology, box.positions,
-                     [[side, 0, 0], [np.nan, side, 0], [0, 0, side]])
+    well = testsystems.double_well()
+    assert from_objects(well.system, well.topology, well.positions,
+                        -np.eye(3)) is not None
+
+
+def test_a_refused_box_is_explained():
+    """A box of the wrong shape or not finite is said to be; for one OpenMM
+    refuses, each way the message offers works and keeps the lattice; a box
+    of no volume is said to be one; OpenMM alone decides what is taken."""
     from openmm import unit
     from openmm.app.internal.unitcell import (computePeriodicBoxVectors,
                                               reducePeriodicBoxVectors)
+
+    from resremd.errors import InputError
+    from resremd.system import _box_refused, from_objects
+
+    box = testsystems.lj_box()
+    side = box.box[0, 0]
 
     def refused(wrong):
         with pytest.raises(InputError, match="cannot be used") as error:
@@ -108,7 +115,7 @@ def test_a_system_in_memory_needs_no_box_given():
         return np.array(vectors.value_in_unit(unit.nanometer))
 
     def into_limits(v):
-        """Values left just past a limit by rounding, moved just inside."""
+        """Values just past a limit, moved just inside."""
         v = np.array(v, float)
         for i, j, k in ((1, 0, 0), (2, 0, 0), (2, 1, 1)):
             limit = v[k, k] / 2
@@ -116,32 +123,52 @@ def test_a_system_in_memory_needs_no_box_given():
                 v[i, j] = np.copysign(np.nextafter(limit, 0), v[i, j])
         return v
 
+    with pytest.raises(InputError, match="The box is three vectors"):
+        from_objects(box.system, box.topology, box.positions,
+                     [[1.0, 2.0], [3.0, 4.0]])
+    with pytest.raises(InputError, match="not all finite"):
+        from_objects(box.system, box.topology, box.positions,
+                     [[side, 0, 0], [np.nan, side, 0], [0, 0, side]])
+    # The whole message, once.
+    skewed = [[2.0, 0.0, 0.0], [1.2, 2.0, 0.0], [0.0, 0.0, 2.0]]
+    assert refused(skewed) == (
+        f"The box {skewed} cannot be used: "
+        f"{_box_refused(np.array(skewed))} OpenMM needs vector a along x "
+        "and vector b in the xy plane, with a_x, b_y and c_z positive, "
+        "|b_x| and |c_x| at most a_x/2, and |c_y| at most b_y/2. If you "
+        "gave the vectors as columns, give them as rows. Otherwise: rotate "
+        "the box, the positions, any reference positions or fixed "
+        "directions in the System and any trajectory frames to be used "
+        "with it together into that orientation (a rotation, not a "
+        "reflection; values off that orientation only by round-off can be "
+        "set to 0); flip a if a_x < 0, b if b_y < 0 and c if c_z < 0; add "
+        "to c whole multiples of b, then of a; and add to b whole multiples "
+        "of a. Flips and additions keep the lattice. openmm.app.internal."
+        "unitcell.reducePeriodicBoxVectors does the adding, but may leave a "
+        "value just past a limit, to be moved just inside.")
     # Off the reduced form by a shift of the lattice (b_x over a_x/2; c_y
-    # over b_y/2, though under half of b's length): the rule and the way
-    # are said, and reducing gives the same lattice in OpenMM's form.
+    # over b_y/2, though under half of b's length): reducing.
     for skewed in ([[side, 0, 0], [0.6 * side, side, 0], [0, 0, side]],
                    [[side, 0, 0], [0.4 * side, 0.6 * side, 0],
                     [0, 0.35 * side, side]]):
-        message = refused(skewed)
-        for said in ("|c_y| at most b_y/2", "give them as rows",
-                     "not a reflection", "flip a if a_x < 0",
-                     "whole multiples", "just past a limit"):
-            assert said in message, message
+        refused(skewed)
         same_lattice(skewed, taken(nm(reducePeriodicBoxVectors(skewed))))
-    # A shift that reducing leaves just past a limit, moved inside.
+    # Just past a limit, as reducing can leave it (c_x one step beyond
+    # -a_x/2): moved inside.
     dodecahedron = nm(computePeriodicBoxVectors(
         2.2, 2.2, 2.2, 60 * unit.degrees, 60 * unit.degrees,
         90 * unit.degrees))
-    a, b, c = dodecahedron
-    shifted = np.array([a, b + 2 * a, c - 3 * b + a])
-    reduced = nm(reducePeriodicBoxVectors(shifted))
-    refused(reduced)
-    same_lattice(dodecahedron, taken(into_limits(reduced)))
-    # Rotated (and negated): rotate back, flip, reduce.
+    past = dodecahedron.copy()
+    past[2, 0] = -np.nextafter(past[0, 0] / 2, np.inf)
+    refused(past)
+    same_lattice(dodecahedron, taken(into_limits(past)))
+    # Rotated, or negated: rotate back, flip, reduce.
     angle = np.radians(30)
     turn = np.array([[1, 0, 0], [0, np.cos(angle), -np.sin(angle)],
                      [0, np.sin(angle), np.cos(angle)]])
-    for wrong in (dodecahedron @ turn.T, -dodecahedron):
+    a, b, c = dodecahedron
+    shifted = np.array([a, b + 2 * a, c - 3 * b + a])
+    for wrong in (dodecahedron @ turn.T, -dodecahedron, shifted @ turn.T):
         refused(wrong)
         q, r = np.linalg.qr(wrong.T)  # wrong = r.T q.T
         if np.linalg.det(q) < 0:  # a rotation, not a reflection
@@ -158,17 +185,27 @@ def test_a_system_in_memory_needs_no_box_given():
     taken(octahedron)
     # No volume, however oriented: no remedy, as none can work.
     flat = np.array([[10, 0, 0], [3, 10, 0], [6e-4, 8e-4, 0]]) @ turn.T
-    for wrong in (np.diag([side, side, 0.0]), flat):
-        assert refused(wrong) == (f"The box {np.asarray(wrong).tolist()} "
-                                  "cannot be used: its vectors span no "
-                                  "volume.")
-    # A huge skew is no lack of volume, and a thin box OpenMM takes is
-    # taken.
-    assert "OpenMM needs" in refused([[3, 0, 0], [3e9 + 0.3, 3.3, 0],
-                                      [0, 0, 2.7]])
+    thin = np.array([[1, 0, 0], [0.5, 1e-15, 0], [0, 0, 1]]) @ turn.T
+    for wrong in (np.diag([side, side, 0.0]), flat, thin,
+                  [[1, 1, 0], [0, 0, 0], [0, 0, 1]]):
+        assert refused(wrong).endswith(
+            "cannot be used: its vectors span no volume, or too little to "
+            "trust.")
+    # Thin but in OpenMM's orientation (its volume exact), or not too thin
+    # to trust: the note.
+    for wrong in ([[1, 0, 0], [0.6, 1e-13, 0], [0, 0, 1]],
+                  np.array([[1, 0, 0], [0.5, 1e-11, 0], [0, 0, 1]]) @ turn.T):
+        assert "OpenMM needs" in refused(wrong)
+    # Either side of the line, turned.
+    for b_y, trusted in ((0.9e-12, False), (1.1e-12, True)):
+        wrong = np.array([[1, 0, 0], [1, b_y, 0], [0, 0, 1]]) @ turn.T
+        assert ("OpenMM needs" in refused(wrong)) == trusted
+    # Volume, skewed (well within 1e12), turned or of unequal vectors: the
+    # note, not "no volume", and never anything but an InputError.
+    skew = np.array([[3, 0, 0], [3e9 + 0.3, 3.3, 0], [0, 0, 2.7]])
+    unequal = np.array([[1e200, 1e-200, 0], [0, 1, 0], [0, 0, 1]])
+    with np.errstate(all="raise"):
+        for wrong in (skew, skew @ turn.T, unequal, unequal @ turn.T):
+            assert "OpenMM needs" in refused(wrong)
+    # A thin box OpenMM takes is taken.
     taken([[1, 0, 0], [0.5, 1e-12, 0], [0, 0, 1]])
-    # A System that is not periodic ignores a box, whatever numbers it
-    # holds.
-    well = testsystems.double_well()
-    assert from_objects(well.system, well.topology, well.positions,
-                        -np.eye(3)) is not None

@@ -187,36 +187,42 @@ def checked(prepared: Prepared) -> Prepared:
         refused = _box_refused(box)
         if refused and _flat(box):
             raise InputError(f"The box {box.tolist()} cannot be used: its "
-                             "vectors span no volume.",
-                             code="resremd.input.prepared")
+                             "vectors span no volume, or too little to "
+                             "trust.", code="resremd.input.prepared")
         if refused:
             raise InputError(
                 f"The box {box.tolist()} cannot be used: {refused} OpenMM "
-                "needs a along x and b in the xy plane, a_x, b_y and c_z "
-                "positive, |b_x| and |c_x| at most a_x/2, and |c_y| at most "
-                "b_y/2. If you gave the vectors as columns, give them as "
-                "rows. Otherwise rotate the box, the positions and any "
-                "reference positions or fixed directions in the System "
+                "needs vector a along x and vector b in the xy plane, with "
+                "a_x, b_y and c_z positive, |b_x| and |c_x| at most a_x/2, "
+                "and |c_y| at most b_y/2. If you gave the vectors as "
+                "columns, give them as rows. Otherwise: rotate the box, the "
+                "positions, any reference positions or fixed directions in "
+                "the System and any trajectory frames to be used with it "
                 "together into that orientation (a rotation, not a "
                 "reflection; values off that orientation only by round-off "
-                "can be set to 0), flip a if a_x < 0, b if b_y < 0 and c if "
-                "c_z < 0, and add whole multiples of a and b to later "
-                "vectors: flips and additions keep the lattice. "
-                "openmm.app.internal.unitcell.reducePeriodicBoxVectors does "
-                "the adding, but may leave a value just past a limit, to be "
-                "moved just inside.", code="resremd.input.prepared")
+                "can be set to 0); flip a if a_x < 0, b if b_y < 0 and c if "
+                "c_z < 0; add to c whole multiples of b, then of a; and add "
+                "to b whole multiples of a. Flips and additions keep the "
+                "lattice. openmm.app.internal.unitcell."
+                "reducePeriodicBoxVectors does the adding, but may leave a "
+                "value just past a limit, to be moved just inside.",
+                code="resremd.input.prepared")
     return prepared
 
 
 def _flat(box: np.ndarray) -> bool:
-    """Whether a box's vectors span no volume, as far as floating point
-    can tell."""
+    """Whether a box's vectors span no volume, or too little to trust. A
+    box in OpenMM's orientation is flat only if a_x, b_y or c_z is 0 (its
+    volume is then exact); any other when its vectors, made unit vectors,
+    span under 1e-12, some thousand times round-off."""
     if box[0, 1] == box[0, 2] == box[1, 2] == 0:  # exact for this form
         return 0 in (box[0, 0], box[1, 1], box[2, 2])
     with np.errstate(all="ignore"):
-        scaled = box / np.abs(box).max()
-        return not abs(np.linalg.det(scaled)) > \
-            1e-12 * np.prod(np.linalg.norm(scaled, axis=1))
+        # Each vector made a unit vector, scaling first so that none under-
+        # or overflows; a vector of zeros gives nan, and counts as flat.
+        rows = box / np.abs(box).max(axis=1, keepdims=True)
+        rows /= np.linalg.norm(rows, axis=1, keepdims=True)
+        return not abs(np.linalg.det(rows)) > 1e-12
 
 
 def _box_refused(box: np.ndarray) -> str | None:
